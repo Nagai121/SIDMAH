@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:sidmah:assignment:start",
+  "title": "Start Assignment meaning",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["objective", "targetAndConditions", "method", "observations", "evaluation"],
+  "properties": {
+    "objective": { "type": "string", "minLength": 1 },
+    "targetAndConditions": { "type": "string", "minLength": 1 },
+    "method": { "type": "string", "minLength": 1 },
+    "observations": { "type": "string", "minLength": 1 },
+    "evaluation": { "type": "string", "minLength": 1 }
+  }
+}

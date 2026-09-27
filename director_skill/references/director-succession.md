@@ -1,0 +1,7 @@
+# Director代替わり
+
+Director代替わりは、active Director sessionの`director_end`完了、またはproviderによる当該sessionの実終了の明示通知後にだけ成立する。無応答時間、streaming中断、内部retry、処理の遅さだけで終了を推定しない。
+
+後任Directorは`director_start`で新しいrunを成立させる。旧runの識別子や履歴を書き換えない。通常研究の再開前に`../fieldcontrol/system_fc.md`で制御系の状態を確認し、未完了のQueryとField Controlの状態を引き継ぐ。
+
+旧Directorが処理途中だったEndは、Runtime Managementがpendingへ戻し、後任session向けの新しいdelivery IDで一件ずつ再提示する。Endの意味内容と論理sourceは変更しない。

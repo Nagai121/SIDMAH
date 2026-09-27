@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:sidmah:assignment:end",
+  "title": "End Assignment meaning",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["observedResults", "outputAudit", "hypothesisJudgement", "reliabilityAndAnomalies", "discussion", "references"],
+  "properties": {
+    "observedResults": { "type": "string", "minLength": 1 },
+    "outputAudit": { "type": "string", "minLength": 1 },
+    "hypothesisJudgement": { "type": "string", "minLength": 1 },
+    "reliabilityAndAnomalies": { "type": "string", "minLength": 1 },
+    "discussion": { "type": "string", "minLength": 1 },
+    "references": { "type": "string", "minLength": 1 }
+  }
+}

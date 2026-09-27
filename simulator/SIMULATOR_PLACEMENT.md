@@ -1,0 +1,5 @@
+# Simulator Placement
+
+このディレクトリは対象Simulatorの原本を置く場所である。ユーザーまたは許可されたエージェントが対象一式を配置する。Directorは原本をread-onlyで確認し、Workerは必要なファイルを現在のCellの`work_place/`へ用意して使用する。原本を変更しない。
+
+この案内ファイルをSimulatorの資料またはコードに数えない。このファイル以外に対象を特定できる内容がなければ、Simulatorは未配置として扱う。

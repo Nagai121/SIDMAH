@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:sidmah:runtime:experiment",
+  "title": "SIDMAH Runtime experiment contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["starter", "simulator", "finisher"],
+  "properties": {
+    "starter": { "$ref": "#/$defs/command" },
+    "simulator": { "$ref": "#/$defs/command" },
+    "finisher": { "$ref": "#/$defs/command" }
+  },
+  "$defs": {
+    "command": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    }
+  }
+}
