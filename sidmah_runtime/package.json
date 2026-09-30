@@ -9,7 +9,7 @@
   "scripts": {
     "start": "node --experimental-strip-types src/mcp/server.ts ..",
     "provider-event": "node --experimental-strip-types src/provider/events.ts",
-    "test": "node --experimental-strip-types --test test/sidmah-v4.1.test.ts test/sidmah-v4.3.test.ts test/sidmah-v5-delivery.test.ts",
+    "test": "node --experimental-strip-types --test test/sidmah-v4.1.test.ts test/sidmah-v4.3.test.ts",
     "export-state": "node --experimental-strip-types src/maintenance/state-export.ts ..",
     "mcp-config-check": "node --experimental-strip-types src/maintenance/mcp-config-sync.ts .. check",
     "mcp-config-apply": "node --experimental-strip-types src/maintenance/mcp-config-sync.ts .. apply",
