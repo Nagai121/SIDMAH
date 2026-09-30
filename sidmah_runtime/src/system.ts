@@ -61,8 +61,12 @@ export class SidmahSystem {
 
   async pump(): Promise<void> {
     this.runtimes.drainWorkerDispatch();
-    for (const cellNo of this.cells.currentBoundCellNumbers()) await this.cells.dispatchNextForCell(cellNo);
-    await this.runtimes.dispatchNextDirector();
+    for (const cellNo of this.cells.currentBoundCellNumbers()) {
+      try { await this.cells.dispatchNextForCell(cellNo); }
+      catch (error) { this.cells.log.write("worker_delivery_failed", { cellNo, error: String(error) }); }
+    }
+    try { await this.runtimes.dispatchNextDirector(); }
+    catch (error) { this.runtimes.log.write("director_delivery_failed", { error: String(error) }); }
   }
   async recover(): Promise<void> { await this.cells.recover(); await this.runtimes.recover(); }
   close(): void { this.runtimes.close(); this.cells.close(); }

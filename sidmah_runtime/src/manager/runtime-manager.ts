@@ -18,6 +18,13 @@ export class RuntimeManager {
   readonly root: string;
   readonly cells: CellManager;
   readonly provider: ProviderHarness;
+  private readonly deliveryRetries = new Map<string, number>();
+  private readonly deliveryRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly receiptChecks = new Map<string, number>();
+  private readonly receiptTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly receiptDeliveryIds = new Map<string, string>();
+  private readonly receiptInFlight = new Set<string>();
+  private closed = false;
   constructor(root: string, cells: CellManager, provider: ProviderHarness) {
     this.root = root; this.cells = cells; this.provider = provider;
     this.db = openDb(resolve(root, "state", "runtime_management.sqlite"));
@@ -221,7 +228,7 @@ export class RuntimeManager {
   }
 
   async starter(sessionToken: string, options: { launch?: boolean } = {}): Promise<{ runtimeId: string; snapshotDirectory: string }> {
-    const item = this.cells.activeWorkerItem(sessionToken, "start");
+    const item = this.cells.claimWorkerItemForMcpCall(sessionToken, "start");
     const startId = item.source_id;
     const start = this.db.prepare("SELECT * FROM starts WHERE start_id=?").get(startId) as any;
     invariant(start && start.state === "inbox_registered", "START_NOT_ACTIVE", "Start is not ready for Starter");
@@ -296,7 +303,8 @@ export class RuntimeManager {
     const fixed = writeFixedResult(runtimeDir, runtimeId, result);
     this.commitFixedResult(runtimeId, fixed, String((result as any).executionStatus));
     this.drainWorkerDispatch();
-    await this.cells.dispatchNextForCell(runtime.cell_no);
+    try { await this.cells.dispatchNextForCell(runtime.cell_no); }
+    catch (error) { this.log.write("result_delivery_failed", { runtimeId, cellNo: runtime.cell_no, error: String(error) }); }
     await this.archive(runtimeId);
   }
 
@@ -322,7 +330,7 @@ export class RuntimeManager {
 
   createEndAssignment(sessionToken: string, rawMeaning: unknown): { endAssignmentId: string; sequence: number } {
     const meaning = endMeaning(rawMeaning);
-    const item = this.cells.activeWorkerItem(sessionToken, "result");
+    const item = this.cells.claimWorkerItemForMcpCall(sessionToken, "result");
     const contextId = item.source_id;
     const context = this.db.prepare("SELECT c.*,r.cell_no FROM result_contexts c JOIN runtimes r ON r.runtime_id=c.runtime_id WHERE c.context_id=?").get(contextId) as any;
     invariant(context && context.state === "inbox_registered", "RESULT_CONTEXT_INVALID", "Active Result context is not available");
@@ -372,6 +380,11 @@ export class RuntimeManager {
         this.db.prepare("UPDATE director_slots SET phase=? WHERE item_id=? AND phase='submitting'").run(state, claim.item_id);
         this.db.prepare("UPDATE ends SET state=? WHERE runtime_id=? AND state='submitting'").run(state, claim.runtime_id);
       });
+      this.deliveryRetries.delete(claim.item_id);
+      const timer = this.deliveryRetryTimers.get(claim.item_id);
+      if (timer) clearTimeout(timer);
+      this.deliveryRetryTimers.delete(claim.item_id);
+      if ((this.db.prepare("SELECT state FROM director_inbox WHERE item_id=?").get(claim.item_id) as any)?.state === "submitted") this.scheduleReceiptCheck(claim.item_id);
       return claim.item_id;
     } catch (error) {
       transaction(this.db, () => {
@@ -379,11 +392,75 @@ export class RuntimeManager {
         this.db.prepare("UPDATE director_inbox SET state='pending',last_error=? WHERE item_id=? AND state='submitting'").run(String(error), claim.item_id);
         this.db.prepare("UPDATE ends SET state='director_pending' WHERE runtime_id=? AND state='submitting'").run(claim.runtime_id);
       });
+      const attempts = (this.deliveryRetries.get(claim.item_id) ?? 0) + 1;
+      this.deliveryRetries.set(claim.item_id, attempts);
+      if (attempts <= 3 && !this.deliveryRetryTimers.has(claim.item_id)) {
+        const delayMs = [2_000, 10_000, 30_000][attempts - 1];
+        const timer = setTimeout(() => {
+          this.deliveryRetryTimers.delete(claim.item_id);
+          void this.dispatchNextDirector().catch(retryError =>
+            this.log.write("director_delivery_retry_failed", { itemId: claim.item_id, attempt: attempts, error: String(retryError) }));
+        }, delayMs);
+        this.deliveryRetryTimers.set(claim.item_id, timer);
+      }
       throw error;
     }
   }
 
+  private scheduleReceiptCheck(itemId: string): void {
+    if (!this.provider.redeliver || this.receiptTimers.has(itemId)) return;
+    const deliveryId = (this.db.prepare("SELECT delivery_id FROM director_inbox WHERE item_id=?").get(itemId) as any)?.delivery_id;
+    if (!deliveryId) return;
+    if (this.receiptDeliveryIds.get(itemId) !== deliveryId) {
+      this.receiptChecks.delete(itemId);
+      this.receiptDeliveryIds.set(itemId, deliveryId);
+    }
+    const attempt = this.receiptChecks.get(itemId) ?? 0;
+    if (attempt >= 3) return;
+    const timer = setTimeout(() => {
+      this.receiptTimers.delete(itemId);
+      void this.checkUnacknowledgedDirector(itemId).catch(error =>
+        this.log.write("director_receipt_check_failed", { itemId, error: String(error) }));
+    }, [300_000, 900_000, 1_800_000][attempt]);
+    this.receiptTimers.set(itemId, timer);
+  }
+
+  async checkUnacknowledgedDirector(itemId: string): Promise<void> {
+    if (this.closed || this.receiptInFlight.has(itemId)) return;
+    const item = this.db.prepare("SELECT * FROM director_inbox WHERE item_id=? AND state='submitted'").get(itemId) as any;
+    if (!item || !this.provider.redeliver) return;
+    if (this.receiptDeliveryIds.get(itemId) !== item.delivery_id) {
+      this.receiptChecks.delete(itemId);
+      this.receiptDeliveryIds.set(itemId, item.delivery_id);
+    }
+    const director = this.cells.activeDirector();
+    if (!director || director.runId !== item.target_run_id || director.providerSessionId !== item.target_provider_session_id) return;
+    const attempt = (this.receiptChecks.get(itemId) ?? 0) + 1;
+    if (attempt > 3) return;
+    this.receiptChecks.set(itemId, attempt);
+    this.receiptInFlight.add(itemId);
+    try {
+      await this.provider.redeliver({ deliveryId: item.delivery_id, providerSessionId: item.target_provider_session_id, kind: "end", payload: parseJson(item.payload_json) });
+      this.log.write("director_receipt_retry_sent", { itemId, deliveryId: item.delivery_id, attempt });
+    } catch (error) {
+      this.log.write("director_receipt_retry_failed", { itemId, deliveryId: item.delivery_id, attempt, error: String(error) });
+    } finally {
+      this.receiptInFlight.delete(itemId);
+    }
+    if (this.closed) return;
+    if ((this.db.prepare("SELECT state FROM director_inbox WHERE item_id=?").get(itemId) as any)?.state === "submitted") this.scheduleReceiptCheck(itemId);
+  }
+
+  private clearReceiptCheck(itemId: string): void {
+    const timer = this.receiptTimers.get(itemId);
+    if (timer) clearTimeout(timer);
+    this.receiptTimers.delete(itemId);
+    this.receiptChecks.delete(itemId);
+    this.receiptDeliveryIds.delete(itemId);
+  }
+
   markDirectorProcessingStarted(deliveryId: string): void {
+    const receipt = this.db.prepare("SELECT item_id FROM director_inbox WHERE delivery_id=?").get(deliveryId) as any;
     transaction(this.db, () => {
       const item = this.db.prepare("SELECT * FROM director_inbox WHERE delivery_id=? AND state IN('submitting','submitted')").get(deliveryId) as any;
       if (!item) return;
@@ -391,19 +468,28 @@ export class RuntimeManager {
       this.db.prepare("UPDATE director_slots SET phase='active' WHERE item_id=? AND phase IN('submitting','submitted')").run(item.item_id);
       this.db.prepare("UPDATE ends SET state='active' WHERE runtime_id=? AND state IN('submitting','submitted')").run(item.runtime_id);
     });
+    if (receipt) this.clearReceiptCheck(receipt.item_id);
   }
 
   completeEndReview(sessionToken: string): { runtimeId: string } {
     const caller = this.cells.caller(sessionToken);
     invariant(caller.kind === "director" && caller.status === "active", "DIRECTOR_NOT_ACTIVE", "Caller is not active Director");
-    return transaction(this.db, () => {
-      const item = this.db.prepare("SELECT i.* FROM director_slots s JOIN director_inbox i ON i.item_id=s.item_id WHERE s.run_id=? AND s.phase='active'").get(caller.run_id) as any;
+    const completed = transaction(this.db, () => {
+      const item = this.db.prepare(`SELECT i.* FROM director_slots s JOIN director_inbox i ON i.item_id=s.item_id
+        WHERE s.run_id=? AND i.target_provider_session_id=?
+          AND s.phase IN('submitting','submitted','active') AND i.state IN('submitting','submitted','active')`).get(caller.run_id, caller.provider_session_id) as any;
       invariant(item, "NO_ACTIVE_END", "Director has no active End");
+      // This matching review call confirms processing even if the provider callback was delayed.
+      this.db.prepare("UPDATE director_inbox SET state='active' WHERE item_id=? AND state IN('submitting','submitted')").run(item.item_id);
+      this.db.prepare("UPDATE director_slots SET phase='active' WHERE item_id=? AND phase IN('submitting','submitted')").run(item.item_id);
+      this.db.prepare("UPDATE ends SET state='active' WHERE runtime_id=? AND state IN('submitting','submitted')").run(item.runtime_id);
       this.db.prepare("UPDATE director_inbox SET state='completed' WHERE item_id=?").run(item.item_id);
       this.db.prepare("UPDATE ends SET state='completed',completed_at=? WHERE runtime_id=?").run(Date.now(), item.runtime_id);
       this.db.prepare("DELETE FROM director_slots WHERE run_id=?").run(caller.run_id);
-      return { runtimeId: item.runtime_id };
+      return { runtimeId: item.runtime_id, itemId: item.item_id };
     });
+    this.clearReceiptCheck(completed.itemId);
+    return { runtimeId: completed.runtimeId };
   }
 
   releaseDirectorRun(runId: string): void {
@@ -411,6 +497,7 @@ export class RuntimeManager {
       const rows = this.db.prepare("SELECT item_id,runtime_id FROM director_inbox WHERE target_run_id=? AND state IN('submitting','submitted','active')").all(runId) as any[];
       this.db.prepare("DELETE FROM director_slots WHERE run_id=?").run(runId);
       for (const row of rows) {
+        this.clearReceiptCheck(row.item_id);
         this.db.prepare("UPDATE director_inbox SET state='pending',target_run_id=NULL,target_provider_session_id=NULL,last_error='Director session ended' WHERE item_id=?").run(row.item_id);
         this.db.prepare("UPDATE ends SET state='director_pending' WHERE runtime_id=? AND state IN('submitting','submitted','active')").run(row.runtime_id);
       }
@@ -537,11 +624,22 @@ export class RuntimeManager {
     }
     this.reconcileWorkerCompletions();
     this.drainWorkerDispatch();
-    for (const cellNo of this.cells.currentBoundCellNumbers()) await this.cells.dispatchNextForCell(cellNo);
-    await this.dispatchNextDirector();
+    for (const cellNo of this.cells.currentBoundCellNumbers()) {
+      try { await this.cells.dispatchNextForCell(cellNo); }
+      catch (error) { this.log.write("worker_delivery_recovery_failed", { cellNo, error: String(error) }); }
+    }
+    try { await this.dispatchNextDirector(); }
+    catch (error) { this.log.write("director_delivery_recovery_failed", { error: String(error) }); }
     const archives = this.db.prepare("SELECT runtime_id FROM runtimes WHERE state='finished' AND archive_state IN('pending','archiving')").all() as any[];
     for (const row of archives) { try { await this.archive(row.runtime_id); } catch (error) { this.log.write("snapshot_archive_recovery_isolated", { runtimeId: row.runtime_id, error: String(error) }); } }
   }
 
-  close(): void { this.db.close(); }
+  close(): void {
+    this.closed = true;
+    for (const timer of this.deliveryRetryTimers.values()) clearTimeout(timer);
+    for (const timer of this.receiptTimers.values()) clearTimeout(timer);
+    this.deliveryRetryTimers.clear();
+    this.receiptTimers.clear();
+    this.db.close();
+  }
 }

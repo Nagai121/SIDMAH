@@ -1,11 +1,11 @@
 import { resolve } from "node:path";
-import { OutboxProvider } from "../provider/outbox-provider.ts";
+import { CodexQueueProvider } from "../provider/outbox-provider.ts";
 import { SidmahSystem } from "../system.ts";
 import { StdioMcpServer } from "./jsonrpc.ts";
 import { registerTools } from "./tools.ts";
 
 const root = resolve(process.argv[2] ?? process.cwd());
-const provider = new OutboxProvider(resolve(root, "state", "provider-outbox"));
+const provider = new CodexQueueProvider(resolve(root, "state", "provider-outbox"));
 let liveSystem: SidmahSystem | undefined;
 let initializing: Promise<SidmahSystem> | undefined;
 

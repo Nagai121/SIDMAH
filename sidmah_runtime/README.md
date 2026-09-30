@@ -12,6 +12,6 @@ SIDMAHのCell、Runtime、Assignment配送と状態を管理する。Node.js 24�
 
 project rootの`mcp-config.json`がMCP設定の入力である。`worker-model.json`の`model`と`reasoning_effort`をCell Assignment作成時に読み、Directorへ`workerModel`と`reasoningEffort`として返す。WorkerのEnd Assignmentには出力の確認内容と方法を`outputAudit`として含める。
 
-実運用providerは`state/provider-outbox/`を監視し、`docs/provider-contract.md`に従う。MCP tool callの`_meta.threadId`をcaller identityの入口としてManager DBから内部sessionを解決する。MCPのinitialize、ping、tools/listではcaller identityを要求しない。Manager初期化とrecoveryはtool call時まで遅延する。
+標準providerはStart、Result、Endを`state/provider-outbox/delivery/`へ記録し、Codex CLIの`queue`で既存のWorker／Directorチャットへ通知した後、app-server proxyで対象チャットをresumeする。対応するMCP tool callを受信した時点で処理開始を確定する。稼働中の配送失敗と受信未確認には回数を限った再試行を行い、失敗は`last_error`とmachine logに残す。詳細と制約は`docs/provider-contract.md`を参照する。MCP tool callの`_meta.threadId`をcaller identityの入口としてManager DBから内部sessionを解決する。MCPのinitialize、ping、tools/listではcaller identityを要求しない。Manager初期化とrecoveryはtool call時まで遅延する。
 
 SQLiteとmachine logはproject rootの`state/`、Cellの作業物、Snapshot、Resultは`works/`へ実行時に生成する。これらは初期配置に含めない。稼働中のSQLiteを保全するときはstate export経路を使用する。

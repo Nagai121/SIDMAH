@@ -27,5 +27,6 @@ export interface ProviderDeliveryRequest {
 export interface ProviderAcceptance { accepted: boolean; processingStarted: boolean }
 export interface ProviderHarness {
   deliver(request: ProviderDeliveryRequest): Promise<ProviderAcceptance>;
+  redeliver?(request: ProviderDeliveryRequest): Promise<void>;
   terminate(providerSessionId: string, reason: string): Promise<void>;
 }

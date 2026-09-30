@@ -16,6 +16,13 @@ export class CellManager {
   readonly log: MachineLog;
   readonly root: string;
   readonly provider: ProviderHarness;
+  private readonly deliveryRetries = new Map<string, number>();
+  private readonly deliveryRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly receiptChecks = new Map<string, number>();
+  private readonly receiptTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly receiptDeliveryIds = new Map<string, string>();
+  private readonly receiptInFlight = new Set<string>();
+  private closed = false;
   constructor(root: string, provider: ProviderHarness) {
     this.root = root; this.provider = provider;
     this.db = openDb(resolve(root, "state", "cell_management.sqlite"));
@@ -253,23 +260,116 @@ export class CellManager {
         this.db.prepare("UPDATE worker_inbox SET state=?,submitted_at=?,active_at=CASE WHEN ?='active' THEN ? ELSE active_at END WHERE item_id=? AND state='submitting'").run(state, Date.now(), state, Date.now(), claim.item_id);
         this.db.prepare("UPDATE worker_slots SET phase=? WHERE item_id=? AND phase='submitting'").run(state, claim.item_id);
       });
+      this.deliveryRetries.delete(claim.item_id);
+      const timer = this.deliveryRetryTimers.get(claim.item_id);
+      if (timer) clearTimeout(timer);
+      this.deliveryRetryTimers.delete(claim.item_id);
+      if ((this.db.prepare("SELECT state FROM worker_inbox WHERE item_id=?").get(claim.item_id) as any)?.state === "submitted") this.scheduleReceiptCheck(claim.item_id);
       return claim.item_id;
     } catch (error) {
       transaction(this.db, () => {
         this.db.prepare("DELETE FROM worker_slots WHERE item_id=? AND phase='submitting'").run(claim.item_id);
         this.db.prepare("UPDATE worker_inbox SET state='pending',last_error=? WHERE item_id=? AND state='submitting'").run(String(error), claim.item_id);
       });
+      const attempts = (this.deliveryRetries.get(claim.item_id) ?? 0) + 1;
+      this.deliveryRetries.set(claim.item_id, attempts);
+      if (attempts <= 3 && !this.deliveryRetryTimers.has(claim.item_id)) {
+        const delay = [2_000, 10_000, 30_000][attempts - 1];
+        const timer = setTimeout(() => {
+          this.deliveryRetryTimers.delete(claim.item_id);
+          void this.dispatchNextForCell(cellNo).catch(retryError =>
+            this.log.write("worker_delivery_retry_failed", { cellNo, itemId: claim.item_id, attempt: attempts, error: String(retryError) }));
+        }, delay);
+        this.deliveryRetryTimers.set(claim.item_id, timer);
+      }
       throw error;
     }
   }
 
+  private scheduleReceiptCheck(itemId: string): void {
+    if (!this.provider.redeliver || this.receiptTimers.has(itemId)) return;
+    const deliveryId = (this.db.prepare("SELECT delivery_id FROM worker_inbox WHERE item_id=?").get(itemId) as any)?.delivery_id;
+    if (!deliveryId) return;
+    if (this.receiptDeliveryIds.get(itemId) !== deliveryId) {
+      this.receiptChecks.delete(itemId);
+      this.receiptDeliveryIds.set(itemId, deliveryId);
+    }
+    const attempt = this.receiptChecks.get(itemId) ?? 0;
+    if (attempt >= 3) return;
+    const timer = setTimeout(() => {
+      this.receiptTimers.delete(itemId);
+      void this.checkUnacknowledgedWorker(itemId).catch(error =>
+        this.log.write("worker_receipt_check_failed", { itemId, error: String(error) }));
+    }, [300_000, 900_000, 1_800_000][attempt]);
+    this.receiptTimers.set(itemId, timer);
+  }
+
+  async checkUnacknowledgedWorker(itemId: string): Promise<void> {
+    if (this.closed || this.receiptInFlight.has(itemId)) return;
+    const item = this.db.prepare("SELECT * FROM worker_inbox WHERE item_id=? AND state='submitted'").get(itemId) as any;
+    if (!item || !this.provider.redeliver) return;
+    if (this.receiptDeliveryIds.get(itemId) !== item.delivery_id) {
+      this.receiptChecks.delete(itemId);
+      this.receiptDeliveryIds.set(itemId, item.delivery_id);
+    }
+    const binding = this.currentBinding(item.cell_no);
+    if (!binding || binding.provider_session_id !== item.session_id) return;
+    const attempt = (this.receiptChecks.get(itemId) ?? 0) + 1;
+    if (attempt > 3) return;
+    this.receiptChecks.set(itemId, attempt);
+    this.receiptInFlight.add(itemId);
+    try {
+      await this.provider.redeliver({ deliveryId: item.delivery_id, providerSessionId: item.session_id, kind: item.kind, payload: parseJson(item.payload_json) });
+      this.log.write("worker_receipt_retry_sent", { itemId, deliveryId: item.delivery_id, attempt });
+    } catch (error) {
+      this.log.write("worker_receipt_retry_failed", { itemId, deliveryId: item.delivery_id, attempt, error: String(error) });
+    } finally {
+      this.receiptInFlight.delete(itemId);
+    }
+    if (this.closed) return;
+    if ((this.db.prepare("SELECT state FROM worker_inbox WHERE item_id=?").get(itemId) as any)?.state === "submitted") this.scheduleReceiptCheck(itemId);
+  }
+
+  private clearReceiptCheck(itemId: string): void {
+    const timer = this.receiptTimers.get(itemId);
+    if (timer) clearTimeout(timer);
+    this.receiptTimers.delete(itemId);
+    this.receiptChecks.delete(itemId);
+    this.receiptDeliveryIds.delete(itemId);
+  }
+
   markProviderProcessingStarted(deliveryId: string): void {
+    const receipt = this.db.prepare("SELECT item_id FROM worker_inbox WHERE delivery_id=?").get(deliveryId) as any;
     transaction(this.db, () => {
       const row = this.db.prepare("SELECT item_id FROM worker_inbox WHERE delivery_id=? AND state IN('submitting','submitted')").get(deliveryId) as any;
       if (!row) return;
       this.db.prepare("UPDATE worker_inbox SET state='active',active_at=? WHERE item_id=? AND state IN('submitting','submitted')").run(Date.now(), row.item_id);
       this.db.prepare("UPDATE worker_slots SET phase='active' WHERE item_id=? AND phase IN('submitting','submitted')").run(row.item_id);
     });
+    if (receipt) this.clearReceiptCheck(receipt.item_id);
+  }
+
+  /** A matching MCP action is itself proof that this Worker started this delivery. */
+  claimWorkerItemForMcpCall(sessionToken: string, expectedKind: InboxKind): any {
+    const caller = this.caller(sessionToken);
+    invariant(caller.kind === "worker" && caller.status === "active", "WORKER_NOT_ACTIVE", "Caller is not an active Worker");
+    const claimed = transaction(this.db, () => {
+      const row = this.db.prepare(`SELECT i.* FROM worker_slots s
+        JOIN worker_inbox i ON i.item_id=s.item_id
+        JOIN bindings b ON b.cell_no=i.cell_no AND b.worker_id=i.worker_id AND b.status='current'
+        WHERE s.session_id=? AND i.session_id=? AND i.worker_id=?
+          AND s.phase IN('submitting','submitted','active')
+          AND i.state IN('submitting','submitted','active')`).get(caller.provider_session_id, caller.provider_session_id, caller.worker_id) as any;
+      invariant(row, "NO_ACTIVE_INBOX_ITEM", "Worker has no current inbox item");
+      invariant(row.kind === expectedKind, "WRONG_ACTIVE_ITEM", `Active item is not ${expectedKind}`);
+      if (row.state !== "active") {
+        this.db.prepare("UPDATE worker_inbox SET state='active',active_at=? WHERE item_id=? AND state IN('submitting','submitted')").run(Date.now(), row.item_id);
+        this.db.prepare("UPDATE worker_slots SET phase='active' WHERE item_id=? AND phase IN('submitting','submitted')").run(row.item_id);
+      }
+      return { ...row, payload: parseJson(row.payload_json) };
+    });
+    this.clearReceiptCheck(claimed.item_id);
+    return claimed;
   }
 
   activeWorkerItem(sessionToken: string, expectedKind?: InboxKind): any {
@@ -329,6 +429,7 @@ export class CellManager {
     if (worker.provider_session_id) {
       const slot = this.db.prepare("SELECT item_id FROM worker_slots WHERE session_id=?").get(worker.provider_session_id) as any;
       if (slot) {
+        this.clearReceiptCheck(slot.item_id);
         const item = this.db.prepare("SELECT kind FROM worker_inbox WHERE item_id=?").get(slot.item_id) as any;
         this.db.prepare("UPDATE worker_inbox SET state=CASE WHEN kind='cell' THEN 'cancelled' ELSE 'pending' END,worker_id=NULL,session_id=NULL,priority=CASE WHEN kind='result' THEN 10 ELSE 20 END,last_error=? WHERE item_id=?").run(reason, slot.item_id);
         this.db.prepare("DELETE FROM worker_slots WHERE session_id=?").run(worker.provider_session_id);
@@ -357,8 +458,18 @@ export class CellManager {
 
   async recover(): Promise<void> {
     const cells = this.db.prepare("SELECT cell_no FROM bindings WHERE status='current'").all() as any[];
-    for (const row of cells) await this.dispatchNextForCell(row.cell_no);
+    for (const row of cells) {
+      try { await this.dispatchNextForCell(row.cell_no); }
+      catch (error) { this.log.write("worker_delivery_recovery_failed", { cellNo: row.cell_no, error: String(error) }); }
+    }
   }
 
-  close(): void { this.db.close(); }
+  close(): void {
+    this.closed = true;
+    for (const timer of this.deliveryRetryTimers.values()) clearTimeout(timer);
+    for (const timer of this.receiptTimers.values()) clearTimeout(timer);
+    this.deliveryRetryTimers.clear();
+    this.receiptTimers.clear();
+    this.db.close();
+  }
 }
