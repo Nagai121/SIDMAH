@@ -178,9 +178,9 @@ export class RuntimeManager {
   private async runStarterPreflight(workPlace: string, runtimeDir: string, timeoutMs: number): Promise<void> {
     const preflight = resolve(runtimeDir, `.preflight-${randomUUID()}`);
     const preflightOutput = resolve(runtimeDir, `.preflight-output-${randomUUID()}`);
-    cpSync(workPlace, preflight, { recursive: true, errorOnExist: true });
-    mkdirSync(preflightOutput, { recursive: true });
     try {
+      cpSync(workPlace, preflight, { recursive: true, errorOnExist: true });
+      mkdirSync(preflightOutput, { recursive: true });
       this.validateExperiment(preflight);
       this.freezeSnapshot(preflight);
       const before = this.treeManifest(preflight).hash;
@@ -247,7 +247,13 @@ export class RuntimeManager {
     if (!temporary || !existsSync(temporary) || current.snapshot_source_hash !== sourceHash) {
       temporary = `${snapshot}.${randomUUID()}.tmp`;
       transaction(this.db, () => this.db.prepare("UPDATE runtimes SET snapshot_state='copying',snapshot_temporary_path=?,snapshot_source_path=?,snapshot_destination_path=?,snapshot_source_hash=? WHERE runtime_id=?").run(temporary, workPlace, snapshot, sourceHash, runtime.runtime_id));
-      cpSync(workPlace, temporary, { recursive: true, errorOnExist: true });
+      try {
+        cpSync(workPlace, temporary, { recursive: true, errorOnExist: true });
+      } catch (error) {
+        this.makeWritable(temporary); rmSync(temporary, { recursive: true, force: true });
+        transaction(this.db, () => this.db.prepare("UPDATE runtimes SET snapshot_state='none',snapshot_temporary_path=NULL WHERE runtime_id=? AND state='created' AND snapshot_state='copying' AND snapshot_temporary_path=?").run(runtime.runtime_id, temporary));
+        throw error;
+      }
     }
     this.validateExperiment(temporary);
     await this.commitSnapshot(runtime.runtime_id, temporary, snapshot, workPlace, sourceHash);
@@ -308,9 +314,40 @@ export class RuntimeManager {
     await this.archive(runtimeId);
   }
 
+  private recoverOneFilesystemResult(runtime: any): boolean {
+    const dir = resolve(this.root, "works", `cell_${runtime.cell_no}`, `runtime_${runtime.runtime_no}`);
+    const resultRef = resolve(dir, "result.json"), manifestRef = resolve(dir, "result.manifest.json");
+    if (!existsSync(resultRef) || !existsSync(manifestRef)) return false;
+    let manifest: any, body: string, hash: string, result: any;
+    try {
+      manifest = JSON.parse(readFileSync(manifestRef, "utf8"));
+      body = readFileSync(resultRef, "utf8");
+      hash = createHash("sha256").update(body).digest("hex");
+      result = JSON.parse(body);
+    } catch {
+      return false;
+    }
+    if (manifest.complete !== true || manifest.runtimeId !== runtime.runtime_id || manifest.resultHash !== hash) return false;
+    try {
+      this.commitFixedResult(runtime.runtime_id, { resultRef, resultHash: hash, manifestRef }, String(result.executionStatus));
+      return true;
+    } catch (error: any) {
+      if (error?.code === "RUNTIME_ALREADY_FINISHED") return true;
+      throw error;
+    }
+  }
+
   private async finishWithSyntheticFailure(runtimeId: string, status: string, error: string): Promise<void> {
     const runtime = this.db.prepare("SELECT * FROM runtimes WHERE runtime_id=?").get(runtimeId) as any;
-    const dir = resolve(this.root, "works", `cell_${runtime.cell_no}`, `runtime_${runtime.runtime_no}`);
+    if (!runtime || runtime.state === "finished") return;
+    const claimed = transaction(this.db, () => this.db.prepare("UPDATE runtimes SET state_version=state_version+1 WHERE runtime_id=? AND state!='finished' AND state_version=?").run(runtimeId, runtime.state_version));
+    if (claimed.changes !== 1) return;
+    const current = this.db.prepare("SELECT * FROM runtimes WHERE runtime_id=?").get(runtimeId) as any;
+    if (!current || current.state === "finished" || this.recoverOneFilesystemResult(current)) return;
+    const dir = resolve(this.root, "works", `cell_${current.cell_no}`, `runtime_${current.runtime_no}`);
+    if (existsSync(dir)) for (const name of readdirSync(dir)) {
+      if (/^result(?:\.manifest)?\.json\..+\.tmp$/.test(name)) rmSync(resolve(dir, name), { force: true });
+    }
     const fixed = writeFixedResult(dir, runtimeId, { schemaVersion: 1, executionStatus: status, error, stages: {} });
     this.commitFixedResult(runtimeId, fixed, status);
   }
@@ -512,7 +549,7 @@ export class RuntimeManager {
     const forcedArchiveStage = process.env.SIDMAH_TEST_FAIL_ARCHIVE_STAGE
       ?? (existsSync(resolve(snapshot, "SIDMAH_TEST_FORCE_ARCHIVE_FAILURE")) ? "prepare" : undefined);
     const attempts: Array<Record<string, unknown>> = [];
-    const temporary = resolve(dir, `${snapshotName}.tar.zst.tmp`), final = resolve(dir, `${snapshotName}.tar.zst`);
+    const temporary = resolve(dir, `${snapshotName}.tar.zst.${randomUUID()}.tmp`), final = resolve(dir, `${snapshotName}.tar.zst`);
     const cleanup = () => {
       try {
         invariant(existsSync(final), "ARCHIVE_MISSING", "Fixed archive is missing; preserve Snapshot");
@@ -542,9 +579,14 @@ export class RuntimeManager {
         transaction(this.db, () => this.db.prepare("UPDATE runtimes SET archive_state='fixed' WHERE runtime_id=?").run(runtimeId));
         cleanup();
         this.log.write("snapshot_archived", { runtimeId, final }); return;
-      } catch (error) { attempts.push({ attempt, at: Date.now(), error: String(error) }); }
+      } catch (error) {
+        attempts.push({ attempt, at: Date.now(), error: String(error) });
+        rmSync(temporary, { force: true });
+        const latest = this.db.prepare("SELECT archive_state FROM runtimes WHERE runtime_id=?").get(runtimeId) as any;
+        if (latest?.archive_state === "fixed") { cleanup(); return; }
+      }
     }
-    try { transaction(this.db, () => this.db.prepare("UPDATE runtimes SET archive_state='failed',archive_diagnostics_json=? WHERE runtime_id=?").run(json({ stage: "archive", attempts, temporary, final, snapshot, recordedAt: Date.now() }), runtimeId)); }
+    try { transaction(this.db, () => this.db.prepare("UPDATE runtimes SET archive_state='failed',archive_diagnostics_json=? WHERE runtime_id=? AND archive_state!='fixed'").run(json({ stage: "archive", attempts, temporary, final, snapshot, recordedAt: Date.now() }), runtimeId)); }
     catch (error) { this.log.write("snapshot_archive_diagnostics_failed", { runtimeId, error: String(error), attempts }); return; }
     this.log.write("snapshot_archive_failed", { runtimeId, attempts });
   }
@@ -552,15 +594,7 @@ export class RuntimeManager {
   recoverFilesystemResults(): number {
     const rows = this.db.prepare("SELECT * FROM runtimes WHERE state IN('launching','running')").all() as any[];
     let count = 0;
-    for (const runtime of rows) {
-      const dir = resolve(this.root, "works", `cell_${runtime.cell_no}`, `runtime_${runtime.runtime_no}`), resultRef = resolve(dir, "result.json"), manifestRef = resolve(dir, "result.manifest.json");
-      if (!existsSync(resultRef) || !existsSync(manifestRef)) continue;
-      const manifest = JSON.parse(readFileSync(manifestRef, "utf8")), body = readFileSync(resultRef, "utf8"), hash = createHash("sha256").update(body).digest("hex");
-      if (manifest.complete === true && manifest.runtimeId === runtime.runtime_id && manifest.resultHash === hash) {
-        const result = JSON.parse(body);
-        this.commitFixedResult(runtime.runtime_id, { resultRef, resultHash: hash }, String(result.executionStatus)); count++;
-      }
-    }
+    for (const runtime of rows) if (this.recoverOneFilesystemResult(runtime)) count++;
     return count;
   }
 

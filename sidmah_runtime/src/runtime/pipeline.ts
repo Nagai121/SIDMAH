@@ -56,7 +56,10 @@ export function writeFixedResult(runtimeDirectory: string, runtimeId: string, re
   const body = JSON.stringify(result, null, 2), hash = createHash("sha256").update(body).digest("hex");
   const resultRef = resolve(runtimeDirectory, "result.json"), manifestRef = resolve(runtimeDirectory, "result.manifest.json");
   const resultTmp = `${resultRef}.${randomUUID()}.tmp`, manifestTmp = `${manifestRef}.${randomUUID()}.tmp`;
-  writeFileSync(resultTmp, body, "utf8"); renameSync(resultTmp, resultRef);
-  writeFileSync(manifestTmp, JSON.stringify({ schemaVersion: 1, runtimeId, resultHash: hash, complete: true }, null, 2), "utf8"); renameSync(manifestTmp, manifestRef);
+  writeFileSync(resultTmp, body, "utf8");
+  writeFileSync(manifestTmp, JSON.stringify({ schemaVersion: 1, runtimeId, resultHash: hash, complete: true }, null, 2), "utf8");
+  // Publish the manifest first so a crash can never leave an apparently final Result without its integrity record.
+  renameSync(manifestTmp, manifestRef);
+  renameSync(resultTmp, resultRef);
   return { resultRef, resultHash: hash, manifestRef };
 }

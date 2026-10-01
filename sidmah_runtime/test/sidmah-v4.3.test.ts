@@ -294,7 +294,7 @@ test("fixed archive cleanup preserves Snapshot when archive is corrupt or missin
   } finally { x.cleanup(); }
 });
 
-import { executePipeline } from "../src/runtime/pipeline.ts";
+import { executePipeline, writeFixedResult } from "../src/runtime/pipeline.ts";
 test("Runtime timeout is optional; explicit and very long limits retain their meaning", async () => {
   const x = setup(); try {
     const cell = await boundFixture(x), start = await x.system.createStart(director, cell.cellNo, startMeaning);
@@ -404,4 +404,37 @@ test("legacy commit_pending without a manifest validates against the saved sourc
     await x.system.recover();
     assert.equal((x.system.runtimes.db.prepare("SELECT snapshot_state FROM runtimes WHERE runtime_id=?").get(start.runtimeId) as any).snapshot_state, "fixed");
   } finally { x.cleanup(); }
+});
+
+
+test("synthetic failure preserves a complete filesystem Result that won the executor race", async () => {
+  const x = setup(); try {
+    const cell = await boundFixture(x), start = await x.system.createStart(director, cell.cellNo, startMeaning);
+    const context = x.system.contextForProviderSession("worker-v43");
+    const { snapshotDirectory } = await x.system.runtimes.starter(context.sessionToken, { launch: false });
+    const row = x.system.runtimes.db.prepare("SELECT * FROM runtimes WHERE runtime_id=?").get(start.runtimeId) as any;
+    x.system.runtimes.claimExecution(start.runtimeId, row.executor_token);
+    const runtimeDir = resolve(snapshotDirectory, "..");
+    const normal = { schemaVersion: 1, executionStatus: "success", stages: {} };
+    const fixed = writeFixedResult(runtimeDir, start.runtimeId, normal);
+    await (x.system.runtimes as any).finishWithSyntheticFailure(start.runtimeId, "executor_failed", "late recovery");
+    const committed = x.system.runtimes.db.prepare("SELECT state,execution_status,result_hash FROM runtimes WHERE runtime_id=?").get(start.runtimeId) as any;
+    assert.equal(committed.state, "finished"); assert.equal(committed.execution_status, "success"); assert.equal(committed.result_hash, fixed.resultHash);
+    assert.equal(JSON.parse(readFileSync(fixed.resultRef, "utf8")).executionStatus, "success");
+  } finally { x.cleanup(); }
+});
+
+test("archive failure removes its private temporary archive", async () => {
+  const x = setup(); try {
+    const cell = await boundFixture(x), start = await x.system.createStart(director, cell.cellNo, startMeaning);
+    const context = x.system.contextForProviderSession("worker-v43");
+    const { snapshotDirectory } = await x.system.runtimes.starter(context.sessionToken, { launch: false });
+    const row = x.system.runtimes.db.prepare("SELECT * FROM runtimes WHERE runtime_id=?").get(start.runtimeId) as any;
+    process.env.SIDMAH_TEST_FAIL_ARCHIVE_STAGE = "rename";
+    await x.system.runtimes.executeClaimed(start.runtimeId, row.executor_token);
+    delete process.env.SIDMAH_TEST_FAIL_ARCHIVE_STAGE;
+    const runtimeDir = resolve(snapshotDirectory, "..");
+    assert.equal(readdirSync(runtimeDir).filter(name => name.startsWith(`snapshot-${start.runtimeNo}.tar.zst.`) && name.endsWith(".tmp")).length, 0);
+    assert.equal((x.system.runtimes.db.prepare("SELECT archive_state FROM runtimes WHERE runtime_id=?").get(start.runtimeId) as any).archive_state, "failed");
+  } finally { delete process.env.SIDMAH_TEST_FAIL_ARCHIVE_STAGE; x.cleanup(); }
 });
