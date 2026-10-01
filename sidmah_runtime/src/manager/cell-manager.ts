@@ -161,19 +161,20 @@ export class CellManager {
     return {
       assignmentId: created.assignmentId, cellNo: created.cellNo, workerNo: created.workerNo,
       workerModel: workerModel.model, reasoningEffort: workerModel.reasoningEffort,
-      bootstrap: "あなたはWorkerである。./worker_skill/SKILL.mdに従い、Systemから渡された現在の一件だけを処理する。最初にaccept_cell_assignmentを呼ぶ。",
+      bootstrap: `あなたはWorkerである。./worker_skill/SKILL.mdに従い、Systemから渡された現在の一件だけを処理する。最初にaccept_cell_assignmentをassignmentId=${created.assignmentId}で呼ぶ。このIDはSystemから渡された値をそのまま使う。`,
       assignment: { assignmentId: created.assignmentId, cellNo: created.cellNo, workerNo: created.workerNo, meaning: created.meaning, fence: created.fence },
     };
   }
 
-  claimPendingCellAssignment(providerSessionId: string): { assignmentId: string; cellNo: number; workerNo: number } {
+  claimPendingCellAssignment(providerSessionId: string, assignmentId?: string): { assignmentId: string; cellNo: number; workerNo: number } {
     return transaction(this.db, () => {
       const rows = this.db.prepare(`SELECT a.assignment_id,a.cell_no,a.worker_id,w.worker_no,i.item_id
         FROM cell_assignments a JOIN workers w ON w.worker_id=a.worker_id
         JOIN bindings b ON b.worker_id=w.worker_id JOIN director_runs d ON d.run_id=a.run_id
         JOIN worker_inbox i ON i.source_id=a.assignment_id
         WHERE a.state='spawn_pending' AND w.status='provisioning' AND b.status='provisioning' AND d.status='active'
-        ORDER BY a.created_at`).all() as any[];
+        AND (? IS NULL OR a.assignment_id=?)
+        ORDER BY a.created_at`).all(assignmentId ?? null, assignmentId ?? null) as any[];
       invariant(rows.length === 1, rows.length === 0 ? "CELL_ASSIGNMENT_NOT_FOUND" : "CELL_ASSIGNMENT_AMBIGUOUS", "Exactly one pending Cell Assignment is required for an unregistered Worker claim");
       const row = rows[0];
       invariant(!this.callerByProviderSessionId(providerSessionId), "SESSION_ALREADY_REGISTERED", "Provider session is already registered");
@@ -394,7 +395,16 @@ export class CellManager {
     });
   }
 
-  acknowledgeCellAssignment(sessionToken: string): void { this.completeWorkerItem(sessionToken, "cell"); }
+  acknowledgeCellAssignment(sessionToken: string, assignmentId?: string): void {
+    if (assignmentId !== undefined) {
+      const caller = this.caller(sessionToken);
+      invariant(caller.kind === "worker" && caller.status === "active", "WORKER_NOT_ACTIVE", "Caller is not an active Worker");
+      const assignment = this.db.prepare("SELECT state FROM cell_assignments WHERE assignment_id=? AND worker_id=?").get(assignmentId, caller.worker_id) as any;
+      invariant(assignment, "CELL_ASSIGNMENT_NOT_FOUND", "Cell Assignment does not belong to this Worker");
+      if (assignment.state === "completed") return;
+    }
+    this.completeWorkerItem(sessionToken, "cell");
+  }
 
   completeItemBySource(kind: Exclude<InboxKind,"cell">, sourceId: string): void {
     transaction(this.db, () => {
@@ -442,7 +452,7 @@ export class CellManager {
     if (binding) this.db.prepare("UPDATE worker_inbox SET worker_id=NULL,session_id=NULL,state='pending' WHERE cell_no=? AND kind IN('start','result') AND state IN('pending','submitting','submitted','active')").run(binding.cell_no);
   }
 
-  async endDirector(sessionToken: string): Promise<{ runId: string }> {
+  async endDirector(sessionToken: string): Promise<{ runId: string; terminationFailures: Array<{ providerSessionId: string; error: string }> }> {
     const caller = this.caller(sessionToken);
     invariant(caller.kind === "director" && caller.status === "active", "DIRECTOR_NOT_ACTIVE", "Caller is not the active Director");
     const sessions = transaction(this.db, () => {
@@ -451,9 +461,18 @@ export class CellManager {
       this.db.prepare("UPDATE director_runs SET status='ended',ended_at=? WHERE run_id=? AND status='active'").run(Date.now(), caller.run_id);
       return rows.map(x => x.provider_session_id).filter(Boolean);
     });
-    await Promise.all(sessions.map(id => this.provider.terminate(id, "Director run ended")));
+    const results = await Promise.allSettled(sessions.map(id => this.provider.terminate(id, "Director run ended")));
+    const terminationFailures: Array<{ providerSessionId: string; error: string }> = [];
+    for (let i = 0; i < results.length; i++) {
+      const result = results[i];
+      if (result.status === "rejected") {
+        const failure = { providerSessionId: sessions[i], error: String(result.reason) };
+        terminationFailures.push(failure);
+        this.log.write("worker_termination_failed", failure);
+      }
+    }
     this.log.write("director_ended", { runId: caller.run_id });
-    return { runId: caller.run_id };
+    return { runId: caller.run_id, terminationFailures };
   }
 
   async recover(): Promise<void> {

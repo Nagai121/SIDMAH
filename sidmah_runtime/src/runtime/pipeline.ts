@@ -5,14 +5,23 @@ import { resolve } from "node:path";
 
 export interface StageResult { state: "success" | "failed" | "timeout" | "skipped"; exitCode: number | null; signal: string | null; stdout: string; stderr: string }
 
-async function command(command: string[], cwd: string, runtimeDirectory: string, remainingMs: number): Promise<StageResult> {
-  if (remainingMs <= 0) return { state: "timeout", exitCode: null, signal: null, stdout: "", stderr: "Runtime timeout before stage" };
+async function command(command: string[], cwd: string, runtimeDirectory: string, remainingMs: number | undefined): Promise<StageResult> {
+  if (remainingMs !== undefined && remainingMs <= 0) return { state: "timeout", exitCode: null, signal: null, stdout: "", stderr: "Runtime timeout before stage" };
   return await new Promise(resolvePromise => {
     const child = spawn(command[0], command.slice(1), { cwd, windowsHide: true, shell: false, env: { ...process.env, SIDMAH_SNAPSHOT: cwd, SIDMAH_RUNTIME_OUTPUT: runtimeDirectory } });
     let stdout = "", stderr = "", timedOut = false;
     child.stdout?.on("data", data => stdout += data.toString());
     child.stderr?.on("data", data => stderr += data.toString());
-    const timer = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, remainingMs);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    if (remainingMs !== undefined) {
+      const deadline = Date.now() + remainingMs;
+      const checkTimeout = () => {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) { timedOut = true; child.kill("SIGKILL"); }
+        else timer = setTimeout(checkTimeout, Math.min(remaining, 2_147_483_647));
+      };
+      checkTimeout();
+    }
     child.on("error", error => { clearTimeout(timer); resolvePromise({ state: "failed", exitCode: null, signal: null, stdout, stderr: stderr + String(error) }); });
     child.on("exit", (code, signal) => { clearTimeout(timer); resolvePromise({ state: timedOut ? "timeout" : code === 0 ? "success" : "failed", exitCode: code, signal, stdout, stderr }); });
   });
@@ -21,12 +30,13 @@ async function command(command: string[], cwd: string, runtimeDirectory: string,
 export async function executePipeline(snapshot: string, runtimeDirectory: string, timeoutMs: number): Promise<Record<string, unknown>> {
   const contract = JSON.parse(await (await import("node:fs/promises")).readFile(resolve(snapshot, "experiment.json"), "utf8"));
   const started = Date.now(), results: Record<string, StageResult> = {};
+  const remaining = () => timeoutMs === 0 ? undefined : timeoutMs - (Date.now() - started);
   const skipped = (): StageResult => ({ state: "skipped", exitCode: null, signal: null, stdout: "", stderr: "" });
-  results.starter = await command(contract.starter, snapshot, runtimeDirectory, timeoutMs - (Date.now() - started));
+  results.starter = await command(contract.starter, snapshot, runtimeDirectory, remaining());
   if (results.starter.state !== "success") { results.simulator = skipped(); results.finisher = skipped(); }
   else {
-    results.simulator = await command(contract.simulator, snapshot, runtimeDirectory, timeoutMs - (Date.now() - started));
-    results.finisher = results.simulator.state === "timeout" ? skipped() : await command(contract.finisher, snapshot, runtimeDirectory, timeoutMs - (Date.now() - started));
+    results.simulator = await command(contract.simulator, snapshot, runtimeDirectory, remaining());
+    results.finisher = results.simulator.state === "timeout" ? skipped() : await command(contract.finisher, snapshot, runtimeDirectory, remaining());
   }
   mkdirSync(runtimeDirectory, { recursive: true });
   for (const [name, value] of Object.entries(results)) {

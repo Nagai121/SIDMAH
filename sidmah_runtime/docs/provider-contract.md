@@ -2,12 +2,12 @@
 
 Worker LLM sessionの起動はDirectorの責務であり、Provider outboxはspawn要求を持たない。`create_cell_assignment`はCell、provisioning Worker、Binding、fence、pending assignmentを永続化し、Directorへmodel、reasoning effort、bootstrap、assignment payloadを返す。
 
-DirectorがWorkerを起動した後、そのWorkerは最初に`accept_cell_assignment`を呼ぶ。ManagerはMCP requestのthread identityを使い、active Director runに属する唯一のpending Cell Assignmentだけをclaimする。pending assignmentが0件または複数ならfail-closedする。
+DirectorがWorkerを起動した後、そのWorkerは最初に`accept_cell_assignment`を呼ぶ。Workerはbootstrapに含まれる`assignmentId`をそのまま渡す。ManagerはMCP requestのthread identityと指定IDを使い、active Director runに属する対応するpending Cell Assignmentをclaimする。ID省略時は後方互換のためpendingがちょうど1件の場合だけ受け付ける。指定IDが別Workerに属する場合や、ID省略時にpendingが0件または複数の場合はfail-closedする。
 
 Provider境界が扱うのは次だけである。
 
 - `delivery/<deliveryId>.json`: Start、Result、Endのsession配送。再送は同じdelivery IDを使う。
-- `terminate/<providerSessionId>.json`: Director終了等による明示的session終了。
+- `terminate/<providerSessionId>.json`: Director終了等による明示的session終了要求の永続記録。OutboxProvider単体では外部consumerが必要である。
 - `delivery-started`: providerが処理開始したことの通知。
 - `session-ended`: provider session終了の通知。
 
@@ -26,3 +26,5 @@ queueまたはresumeの失敗はその場で最大3回再試行し、Managerも�
 再通知は同じdelivery IDのCodexメッセージを複数回投入し得る。SIDMAH側の受信処理は現在のsession、BindingまたはDirector run、inbox kindとsource、fenceで照合し、同じRuntimeを二重に実行しない。app-serverのresume成功やCodex turnの完了はMCP受信確認に代わらない。これは稼働中セッション向けのat-least-once通知とSIDMAH側の冪等化であり、分散トランザクションではない。
 
 PCまたはCodex再起動後の未確認配送の自動再開は今回の範囲外である。DBとdelivery JSONは残るが、再起動だけで対象チャットが起きる保証はない。実チャットを用いた無人配送の結合試験も別環境で必要である。
+
+`CodexQueueProvider.terminate()`は終了要求を保存した後、同じapp-server proxyで`thread/archive`を呼ぶ。Codexは対象の稼働中threadをshutdownし、履歴をarchiveする。終了RPCの失敗はDirector終了の返り値とmachine logへ記録する。実Codexでのsession終了の結合試験は別環境で必要である。

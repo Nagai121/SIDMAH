@@ -29,3 +29,11 @@ Resultは`result.json`とSHA-256付き`result.manifest.json`をfilesystemへatom
 EndはWorkerのactive Result ContextだけからRuntimeへ結合する。最新rowや複数active rowから推定しない。Directorにも最大1件のactive Endだけを提示し、`complete_end_review`後に次を提示する。
 
 Snapshot archiveは最大3回試行する。成功時だけ原Snapshotを削除する。失敗時は`failed`として原Snapshotを保持し、ResultとEndは継続する。`archive(runtimeId)`を管理者が明示的に再実行できる。
+
+## v1.0.2の復旧と時間制限
+
+`create_start_assignment.timeoutMs`は任意入力であり、ユーザー指定時だけ正の整数を渡す。省略時は既存DBの`timeout_ms=0`で無制限を表す。Starter preflightにも同じ指定を適用し、独立した30秒の上限は設けない。
+
+`created + commit_pending`で正式Snapshotが存在する場合、保存したmanifestとの同一性と現在のWorker処理権を確認して`launching + fixed`へ収束させる。一時Snapshotだけなら次回Starterで再利用し、両方なければ再構築する。不一致の正式Snapshotは採用せず、次回Starterで再構築する。
+
+`finished + archive fixed + cleanup未完了`も復旧対象とし、固定archiveが読み出せることを確認して元Snapshotの削除だけを再試行する。archiveが欠落・破損していれば元Snapshotを保持し、診断を残す。

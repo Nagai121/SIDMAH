@@ -1,4 +1,6 @@
 # SIDMAH
+
+現在のバージョン: **v1.0.2**
 SIDMAHは、ユーザーから与えられた目的に基づいて計算実験を構築・実行・監査するためのマルチエージェント・ハーネスです。
 
 ## Setup
@@ -74,8 +76,7 @@ SIDMAH/
 │   │   ├── system_fc.md
 │   │   ├── experiment_fc.md
 │   │   └── gate3_record/
-│   │       ├── gate3-record-schema.md
-│   │       └── gate3-record-num.md
+│   │       └── gate3-record-schema.md
 │   └── summary/
 │       └── summary-schema.md
 │

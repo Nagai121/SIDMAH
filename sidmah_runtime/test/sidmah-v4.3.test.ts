@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, renameSync, chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import test from "node:test";
@@ -178,3 +178,230 @@ test("test-build MCP preflight synchronizes only the SIDMAH entry without an app
 
 function requireMcpSync() { return { applyMcpConfig: (root: string, path: string) => importApply(root, path) }; }
 import { applyMcpConfig as importApply } from "../src/maintenance/mcp-config-sync.ts";
+
+
+// v1.0.2 regressions exercise the existing Manager and Provider paths.
+test("parallel provisioning uses explicit assignment IDs and rejects mismatched or duplicate claims", async () => {
+  const x = setup(); try {
+    const first = await x.system.createCell(director, cellMeaning) as any;
+    const second = await x.system.createCell(director, { responsibility: "second" }) as any;
+    const worker1 = { providerSessionId: "parallel-1", sessionToken: "unused" };
+    const worker2 = { providerSessionId: "parallel-2", sessionToken: "unused" };
+    const claims = await Promise.all([
+      x.system.acceptCell(worker2, true, second.assignmentId),
+      x.system.acceptCell(worker1, true, first.assignmentId),
+    ]) as any[];
+    assert.equal(claims[0].cellNo, second.cellNo); assert.equal(claims[1].cellNo, first.cellNo);
+    assert.match(first.bootstrap, new RegExp(first.assignmentId));
+    await assert.rejects(() => x.system.acceptCell({ providerSessionId: "third", sessionToken: "unused" }, true, first.assignmentId), /pending Cell/);
+    const context = x.system.contextForProviderSession(worker1.providerSessionId);
+    await x.system.acceptCell(context, false, first.assignmentId);
+    await assert.rejects(() => x.system.acceptCell(context, false, second.assignmentId), /does not belong/);
+  } finally { x.cleanup(); }
+});
+
+async function pendingSnapshot(x: ReturnType<typeof setup>) {
+  const cell = await boundFixture(x);
+  const start = await x.system.createStart(director, cell.cellNo, startMeaning, 30_000);
+  const context = x.system.contextForProviderSession("worker-v43");
+  process.env.SIDMAH_TEST_FAIL_SNAPSHOT_RENAME = "1";
+  try { await assert.rejects(() => x.system.runtimes.starter(context.sessionToken, { launch: false }), /Injected snapshot/); }
+  finally { delete process.env.SIDMAH_TEST_FAIL_SNAPSHOT_RENAME; }
+  const row = x.system.runtimes.db.prepare("SELECT * FROM runtimes WHERE runtime_id=?").get(start.runtimeId) as any;
+  x.system.runtimes.db.prepare("UPDATE runtimes SET snapshot_state='commit_pending' WHERE runtime_id=?").run(start.runtimeId);
+  return { cell, start, context, row };
+}
+
+for (const bothTrees of [false, true]) test(`recovery adopts verified commit_pending Snapshot after rename/freeze, both trees=${bothTrees}`, async () => {
+  const x = setup(); try {
+    const { start, row } = await pendingSnapshot(x);
+    if (bothTrees) cpSync(row.snapshot_temporary_path, row.snapshot_destination_path, { recursive: true });
+    else renameSync(row.snapshot_temporary_path, row.snapshot_destination_path);
+    for (const name of readdirSync(row.snapshot_destination_path)) {
+      const path = resolve(row.snapshot_destination_path, name); chmodSync(path, lstatSync(path).mode & ~0o222);
+    }
+    chmodSync(row.snapshot_destination_path, lstatSync(row.snapshot_destination_path).mode & ~0o222);
+    // The original work_place can change after the successful rename.
+    writeFileSync(resolve(row.snapshot_source_path, "new-work.txt"), "later work");
+    const launches: string[] = [];
+    x.system.runtimes.launchExecutor = async (id: string) => { launches.push(id); };
+    await x.system.recover();
+    const fixed = x.system.runtimes.db.prepare("SELECT * FROM runtimes WHERE runtime_id=?").get(start.runtimeId) as any;
+    assert.equal(fixed.state, "launching"); assert.equal(fixed.snapshot_state, "fixed");
+    assert.deepEqual(launches, [start.runtimeId]); assert.ok(!existsSync(row.snapshot_temporary_path));
+    assert.equal(x.system.cells.workerItemState("start", start.startId), "completed");
+    const token = fixed.executor_token;
+    await x.system.recover();
+    assert.equal((x.system.runtimes.db.prepare("SELECT executor_token FROM runtimes WHERE runtime_id=?").get(start.runtimeId) as any).executor_token, token);
+  } finally { x.cleanup(); }
+});
+
+for (const temporaryPresent of [false, true]) test(`pending Snapshot resumes Starter with temporary present=${temporaryPresent}`, async () => {
+  const x = setup(); try {
+    const { start, context, row } = await pendingSnapshot(x);
+    if (!temporaryPresent) rmSync(row.snapshot_temporary_path, { recursive: true, force: true });
+    await x.system.recover();
+    await x.system.runtimes.starter(context.sessionToken, { launch: false });
+    assert.equal((x.system.runtimes.db.prepare("SELECT snapshot_state FROM runtimes WHERE runtime_id=?").get(start.runtimeId) as any).snapshot_state, "fixed");
+  } finally { x.cleanup(); }
+});
+
+test("recovery rejects modified committed Snapshot and permits rebuilding", async () => {
+  const x = setup(); try {
+    const { start, context, row } = await pendingSnapshot(x);
+    renameSync(row.snapshot_temporary_path, row.snapshot_destination_path);
+    writeFileSync(resolve(row.snapshot_destination_path, "simulator.mjs"), "throw new Error('corrupt');");
+    await x.system.recover();
+    assert.equal((x.system.runtimes.db.prepare("SELECT snapshot_state FROM runtimes WHERE runtime_id=?").get(start.runtimeId) as any).snapshot_state, "none");
+    assert.ok(!existsSync(row.snapshot_destination_path));
+    await x.system.runtimes.starter(context.sessionToken, { launch: false });
+    assert.ok(existsSync(row.snapshot_destination_path));
+  } finally { x.cleanup(); }
+});
+
+for (const recovery of [false, true]) test(`fixed archive cleanup retries without rewriting archive, recovery=${recovery}`, async () => {
+  const x = setup(); try {
+    const cell = await boundFixture(x), start = await x.system.createStart(director, cell.cellNo, startMeaning);
+    const context = x.system.contextForProviderSession("worker-v43");
+    const { snapshotDirectory } = await x.system.runtimes.starter(context.sessionToken, { launch: false });
+    const row = x.system.runtimes.db.prepare("SELECT * FROM runtimes WHERE runtime_id=?").get(start.runtimeId) as any;
+    process.env.SIDMAH_TEST_FAIL_ARCHIVE_STAGE = "cleanup";
+    await x.system.runtimes.executeClaimed(start.runtimeId, row.executor_token);
+    delete process.env.SIDMAH_TEST_FAIL_ARCHIVE_STAGE;
+    const archive = `${snapshotDirectory}.tar.zst`, before = readFileSync(archive);
+    if (recovery) {
+      x.system.runtimes.db.prepare("UPDATE runtimes SET cleanup_state='pending' WHERE runtime_id=?").run(start.runtimeId);
+      await x.system.recover();
+    } else await x.system.runtimes.archive(start.runtimeId);
+    assert.equal((x.system.runtimes.db.prepare("SELECT cleanup_state FROM runtimes WHERE runtime_id=?").get(start.runtimeId) as any).cleanup_state, "complete");
+    assert.ok(!existsSync(snapshotDirectory)); assert.deepEqual(readFileSync(archive), before);
+    await x.system.runtimes.archive(start.runtimeId);
+    assert.deepEqual(readFileSync(archive), before);
+  } finally { delete process.env.SIDMAH_TEST_FAIL_ARCHIVE_STAGE; x.cleanup(); }
+});
+
+test("fixed archive cleanup preserves Snapshot when archive is corrupt or missing", async () => {
+  const x = setup(); try {
+    const cell = await boundFixture(x), start = await x.system.createStart(director, cell.cellNo, startMeaning);
+    const { snapshotDirectory } = await x.system.runtimes.starter(x.system.contextForProviderSession("worker-v43").sessionToken, { launch: false });
+    x.system.runtimes.db.prepare("UPDATE runtimes SET state='finished',archive_state='fixed' WHERE runtime_id=?").run(start.runtimeId);
+    for (const corrupt of [false, true]) {
+      if (corrupt) writeFileSync(`${snapshotDirectory}.tar.zst`, "corrupt");
+      await x.system.recover();
+      assert.ok(existsSync(snapshotDirectory));
+      assert.equal((x.system.runtimes.db.prepare("SELECT cleanup_state FROM runtimes WHERE runtime_id=?").get(start.runtimeId) as any).cleanup_state, "failed");
+    }
+  } finally { x.cleanup(); }
+});
+
+import { executePipeline } from "../src/runtime/pipeline.ts";
+test("Runtime timeout is optional; explicit and very long limits retain their meaning", async () => {
+  const x = setup(); try {
+    const cell = await boundFixture(x), start = await x.system.createStart(director, cell.cellNo, startMeaning);
+    assert.equal((x.system.runtimes.db.prepare("SELECT timeout_ms FROM runtimes WHERE runtime_id=?").get(start.runtimeId) as any).timeout_ms, 0);
+    const { snapshotDirectory } = await x.system.runtimes.starter(x.system.contextForProviderSession("worker-v43").sessionToken, { launch: false });
+    for (const limit of [0, 3_000_000_000]) {
+      mkdirSync(resolve(x.root, `output-${limit}`), { recursive: true });
+      const result = await executePipeline(snapshotDirectory, resolve(x.root, `output-${limit}`), limit);
+      assert.equal(result.executionStatus, "success");
+    }
+    const timed = await executePipeline(snapshotDirectory, resolve(x.root, "timeout-output"), 1);
+    assert.equal(timed.executionStatus, "timeout");
+    for (const invalid of [0, -1, 1.5, NaN]) await assert.rejects(() => x.system.createStart(director, cell.cellNo, startMeaning, invalid), /positive integer/);
+  } finally { x.cleanup(); }
+});
+
+test("Starter preflight accepts more than 30 seconds under a user-specified limit", async () => {
+  const x = setup(); try {
+    const cell = await boundFixture(x);
+    writeFileSync(resolve(x.root, "works", `cell_${cell.cellNo}`, "work_place", "starter.mjs"), "setTimeout(()=>console.log('slow-preflight-ok'), 30_200);");
+    await x.system.createStart(director, cell.cellNo, startMeaning, 40_000);
+    await x.system.runtimes.starter(x.system.contextForProviderSession("worker-v43").sessionToken, { launch: false });
+    assert.equal((x.system.runtimes.db.prepare("SELECT snapshot_state FROM runtimes").get() as any).snapshot_state, "fixed");
+  } finally { x.cleanup(); }
+});
+
+import { PassThrough, Writable } from "node:stream";
+import { CodexQueueProvider, terminateCodexThread, wakeCodexThread } from "../src/provider/outbox-provider.ts";
+function proxyFixture(rpcError = false) {
+  const output = new PassThrough(), requests: any[] = [];
+  let closed = false;
+  const frame = (value: unknown) => {
+    const body = Buffer.from(JSON.stringify(value));
+    const header = body.length < 126 ? Buffer.from([0x81, body.length]) : Buffer.from([0x81, 126, body.length >>> 8, body.length & 255]);
+    output.write(Buffer.concat([header, body]));
+  };
+  const input = new Writable({ write(chunk, _encoding, done) {
+    const bytes = Buffer.from(chunk);
+    if (bytes.toString().startsWith("GET /")) queueMicrotask(() => output.write("HTTP/1.1 101 Switching Protocols\r\n\r\n"));
+    else {
+      const length = (bytes[1] & 127) === 126 ? bytes.readUInt16BE(2) : bytes[1] & 127;
+      const offset = (bytes[1] & 127) === 126 ? 4 : 2;
+      const mask = bytes.subarray(offset, offset + 4), body = Buffer.from(bytes.subarray(offset + 4, offset + 4 + length));
+      for (let i = 0; i < body.length; i++) body[i] ^= mask[i % 4];
+      const request = JSON.parse(body.toString()); requests.push(request);
+      if (request.id === 1) queueMicrotask(() => frame({ id: 1, result: {} }));
+      if (request.id === 2) queueMicrotask(() => frame(rpcError ? { id: 2, error: { message: "archive refused" } } : { id: 2, result: request.method === "thread/resume" ? { thread: { id: request.params.threadId } } : {} }));
+    }
+    done();
+  } });
+  return { requests, proxy: { input, output, close: () => { closed = true; }, onFailure: (_handler: (error: Error) => void) => {} }, isClosed: () => closed };
+}
+
+test("Codex proxy archives the selected Worker and retains resume behavior", async () => {
+  for (const archive of [false, true]) {
+    const fixture = proxyFixture();
+    await (archive ? terminateCodexThread : wakeCodexThread)("worker-thread", () => fixture.proxy);
+    assert.deepEqual(fixture.requests.at(-1), { id: 2, method: archive ? "thread/archive" : "thread/resume", params: { threadId: "worker-thread" } });
+    assert.ok(fixture.isClosed());
+  }
+  const refused = proxyFixture(true);
+  await assert.rejects(() => terminateCodexThread("worker-thread", () => refused.proxy), /archive refused/);
+  assert.ok(refused.isClosed());
+});
+
+test("Codex termination persists intent, invokes RPC, and exposes failures during Director End", async () => {
+  const x = setup(); try {
+    const ids: string[] = [];
+    const provider = new CodexQueueProvider(resolve(x.root, "outbox"), async () => {}, async () => {}, async id => { ids.push(id); });
+    await provider.terminate("worker", "ended"); assert.deepEqual(ids, ["worker"]);
+    assert.ok(existsSync(resolve(x.root, "outbox", "terminate", `${Buffer.from("worker").toString("base64url")}.json`)));
+    await boundFixture(x);
+    x.provider.terminate = async () => { throw new Error("RPC unavailable"); };
+    const result = await x.system.endDirector(director);
+    assert.equal(result.terminationFailures.length, 1);
+    assert.match(result.terminationFailures[0].error, /RPC unavailable/);
+    assert.equal(x.system.cells.currentBinding(1), undefined);
+    assert.equal(x.system.cells.directorRunStatus(result.runId), "ended");
+  } finally { x.cleanup(); }
+});
+
+
+import { registerTools } from "../src/mcp/tools.ts";
+test("MCP accepts an explicit Cell ID and omits an unspecified Runtime timeout", async () => {
+  const x = setup(); try {
+    const registered = new Map<string, any>();
+    registerTools({ register: (tool: any) => registered.set(tool.name, tool) } as any, async () => x.system);
+    const first = await x.system.createCell(director, cellMeaning) as any;
+    await x.system.createCell(director, { responsibility: "other pending" });
+    const accept = registered.get("accept_cell_assignment");
+    assert.ok(accept.inputSchema.properties.assignmentId);
+    const claim = await accept.call({ assignmentId: first.assignmentId }, { threadId: "mcp-worker" });
+    assert.equal(claim.cellNo, first.cellNo);
+    const createStart = registered.get("create_start_assignment");
+    assert.ok(!createStart.inputSchema.required.includes("timeoutMs"));
+    const start = await createStart.call({ cellNo: first.cellNo, meaning: startMeaning }, { threadId: director.providerSessionId });
+    assert.equal((x.system.runtimes.db.prepare("SELECT timeout_ms FROM runtimes WHERE runtime_id=?").get(start.runtimeId) as any).timeout_ms, 0);
+  } finally { x.cleanup(); }
+});
+
+test("legacy commit_pending without a manifest validates against the saved source hash", async () => {
+  const x = setup(); try {
+    const { start, row } = await pendingSnapshot(x);
+    renameSync(row.snapshot_temporary_path, row.snapshot_destination_path);
+    x.system.runtimes.db.prepare("UPDATE runtimes SET snapshot_diagnostics_json=NULL WHERE runtime_id=?").run(start.runtimeId);
+    x.system.runtimes.launchExecutor = async () => {};
+    await x.system.recover();
+    assert.equal((x.system.runtimes.db.prepare("SELECT snapshot_state FROM runtimes WHERE runtime_id=?").get(start.runtimeId) as any).snapshot_state, "fixed");
+  } finally { x.cleanup(); }
+});

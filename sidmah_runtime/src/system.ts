@@ -36,11 +36,11 @@ export class SidmahSystem {
     const output = await this.cells.createCellAssignment(context.sessionToken, meaning, existingCellNo);
     await this.pump(); return output;
   }
-  async acceptCell(context: CallerContext, unregistered = false) {
-    const output = unregistered ? this.cells.claimPendingCellAssignment(context.providerSessionId) : (this.cells.acknowledgeCellAssignment(context.sessionToken), { ok: true });
+  async acceptCell(context: CallerContext, unregistered = false, assignmentId?: string) {
+    const output = unregistered ? this.cells.claimPendingCellAssignment(context.providerSessionId, assignmentId) : (this.cells.acknowledgeCellAssignment(context.sessionToken, assignmentId), { ok: true });
     await this.pump(); return output;
   }
-  async createStart(context: CallerContext, cellNo: number, meaning: unknown, timeoutMs: number) {
+  async createStart(context: CallerContext, cellNo: number, meaning: unknown, timeoutMs?: number) {
     const output = this.runtimes.createStartAssignment(context.sessionToken, cellNo, meaning, timeoutMs);
     await this.pump(); return output;
   }

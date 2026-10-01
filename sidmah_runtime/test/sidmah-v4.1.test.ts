@@ -31,7 +31,7 @@ test("MCP initialize and tools/list succeed without startup session identity", (
       { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18" } },
       { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
     ]);
-    assert.equal(rows[0].result.serverInfo.version, "4.1.0");
+    assert.equal(rows[0].result.serverInfo.version, "1.0.2");
     assert.ok(rows[1].result.tools.some((tool: any) => tool.name === "director_start"));
     assert.ok(rows[1].result.tools.some((tool: any) => tool.name === "starter"));
   } finally { rmSync(root, { recursive: true, force: true }); }

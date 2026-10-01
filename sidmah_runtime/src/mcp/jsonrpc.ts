@@ -14,7 +14,7 @@ export class StdioMcpServer {
       if (request.jsonrpc !== "2.0" || typeof request.method !== "string") { this.write(request.id ?? null, undefined, { code: -32600, message: "Invalid Request" }); continue; }
       if (request.id === undefined) continue;
       try {
-        if (request.method === "initialize") this.write(request.id, { protocolVersion: request.params?.protocolVersion ?? "2025-06-18", capabilities: { tools: { listChanged: false } }, serverInfo: { name: "sidmah", version: "4.1.0" } });
+        if (request.method === "initialize") this.write(request.id, { protocolVersion: request.params?.protocolVersion ?? "2025-06-18", capabilities: { tools: { listChanged: false } }, serverInfo: { name: "sidmah", version: "1.0.2" } });
         else if (request.method === "ping") this.write(request.id, {});
         else if (request.method === "tools/list") this.write(request.id, { tools: [...this.#tools.values()].map(({ call: _, ...tool }) => tool) });
         else if (request.method === "tools/call") {

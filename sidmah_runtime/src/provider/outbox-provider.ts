@@ -75,12 +75,20 @@ export function openCodexProxy(): CodexProxyTransport {
 }
 
 export function wakeCodexThread(threadId: string, openProxy: () => CodexProxyTransport = openCodexProxy): Promise<void> {
+  return codexThreadOperation(threadId, "thread/resume", openProxy);
+}
+
+export function terminateCodexThread(threadId: string, openProxy: () => CodexProxyTransport = openCodexProxy): Promise<void> {
+  return codexThreadOperation(threadId, "thread/archive", openProxy);
+}
+
+function codexThreadOperation(threadId: string, method: "thread/resume" | "thread/archive", openProxy: () => CodexProxyTransport): Promise<void> {
   return new Promise((resolveWake, rejectWake) => {
     let proxy: CodexProxyTransport;
     try { proxy = openProxy(); }
     catch (error) { rejectWake(error); return; }
     let buffered = Buffer.alloc(0), upgraded = false, settled = false;
-    const timeout = setTimeout(() => finish(new Error("Codex app-server resume timed out")), 15_000);
+    const timeout = setTimeout(() => finish(new Error(`Codex app-server ${method} timed out`)), 15_000);
     const finish = (error?: Error) => {
       if (settled) return;
       settled = true;
@@ -101,10 +109,10 @@ export function wakeCodexThread(threadId: string, openProxy: () => CodexProxyTra
       if (value?.id === 1) {
         if (value.error) return finish(new Error(`Codex initialize: ${value.error.message ?? JSON.stringify(value.error)}`));
         send({ method: "initialized", params: {} });
-        send({ id: 2, method: "thread/resume", params: { threadId } });
+        send({ id: 2, method, params: { threadId } });
       } else if (value?.id === 2) {
-        if (value.error) return finish(new Error(`Codex thread/resume: ${value.error.message ?? JSON.stringify(value.error)}`));
-        if (value.result?.thread?.id !== threadId) return finish(new Error("Codex resumed a different thread"));
+        if (value.error) return finish(new Error(`Codex ${method}: ${value.error.message ?? JSON.stringify(value.error)}`));
+        if (method === "thread/resume" && value.result?.thread?.id !== threadId) return finish(new Error("Codex resumed a different thread"));
         finish();
       }
     };
@@ -121,7 +129,7 @@ export function wakeCodexThread(threadId: string, openProxy: () => CodexProxyTra
         if (!/^HTTP\/1\.1 101\b/.test(status)) return finish(new Error(`Codex WebSocket upgrade failed: ${status.split("\r\n")[0]}`));
         upgraded = true;
         buffered = buffered.subarray(end + 4);
-        send({ id: 1, method: "initialize", params: { clientInfo: { name: "sidmah", title: "SIDMAH", version: "5.0.0" } } });
+        send({ id: 1, method: "initialize", params: { clientInfo: { name: "sidmah", title: "SIDMAH", version: "1.0.2" } } });
       }
       while (buffered.length >= 2 && !settled) {
         const first = buffered[0], second = buffered[1], opcode = first & 0x0f;
@@ -163,12 +171,14 @@ export class CodexQueueProvider implements ProviderHarness {
   private readonly outbox: OutboxProvider;
   private readonly queue: QueueMessage;
   private readonly wake: WakeThread;
+  private readonly terminateThread: WakeThread;
   private readonly root: string;
-  constructor(root: string, queue: QueueMessage = queueCodexMessage, wake: WakeThread = wakeCodexThread) {
+  constructor(root: string, queue: QueueMessage = queueCodexMessage, wake: WakeThread = wakeCodexThread, terminateThread: WakeThread = terminateCodexThread) {
     this.root = root;
     this.outbox = new OutboxProvider(root);
     this.queue = queue;
     this.wake = wake;
+    this.terminateThread = terminateThread;
     mkdirSync(resolve(root, "queued"), { recursive: true });
   }
 
@@ -213,7 +223,8 @@ export class CodexQueueProvider implements ProviderHarness {
     throw lastError;
   }
 
-  terminate(providerSessionId: string, reason: string): Promise<void> {
-    return this.outbox.terminate(providerSessionId, reason);
+  async terminate(providerSessionId: string, reason: string): Promise<void> {
+    await this.outbox.terminate(providerSessionId, reason);
+    await this.terminateThread(providerSessionId);
   }
 }

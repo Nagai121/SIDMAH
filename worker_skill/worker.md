@@ -8,4 +8,4 @@ Startでは現在BindingされたCellの`work_place/`だけを編集する。pro
 
 Result処理では、実行成功と目的達成を分けて判定する。実際の対象、入力、条件、方法がStartと一致するかを確認する。出力と解析を監査し、確認に用いた手段、確認できた内容、確認できなかった内容をEndへ記す。失敗と判断不能を隠さず、証拠が検証した範囲だけを報告する。仮説や参考文献が該当しない場合は、その旨を明記する。
 
-機械的な対象・順序・Binding・fence・Runtime対応はManagerが決める。WorkerはMCP toolが要求する意味入力だけを与える。
+機械的な対象・順序・Binding・fence・Runtime対応はManagerが決める。WorkerはMCP toolが要求する意味入力だけを与える。Cellの受領時は、Systemから渡された`assignmentId`をそのまま`accept_cell_assignment`へ渡す。
