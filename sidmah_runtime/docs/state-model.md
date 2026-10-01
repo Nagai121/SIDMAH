@@ -24,7 +24,7 @@ Worker終了はproviderの明示イベントだけで確定する。処理中の
 
 StarterはWork Placeをtemporary Snapshotへ複製・検証し、atomic renameで固定する。DBを`launching`へ進めて独立executorへ引き渡した時点でStartを完了する。executorは`starter → simulator → finisher`を順次実行する。
 
-Resultは`result.json`とSHA-256付き`result.manifest.json`をfilesystemへatomicに固定した後、単一SQLite transactionでRuntime finished、Result参照、End meaning_pending、Result Contextを確定する。再起動時にはmanifestを検証してDBを収束させる。
+Result確定は既存SQLiteの`BEGIN IMMEDIATE` transaction内で、Runtime状態確認、`result.manifest.json`と`result.json`の順でのatomic rename、Runtime finished・Result参照・End meaning_pending・Result ContextのDB確定まで行う。正常executorとsynthetic failureは同じ確定経路を使い、finishedのRuntimeには再書込みしない。復旧時も同じtransaction内でmanifestとResultのSHA-256を検証してDBを収束させる。filesystem固定後にprocessが終了してDB transactionがrollbackされても、次の復旧で固定済みResultを採用する。
 
 EndはWorkerのactive Result ContextだけからRuntimeへ結合する。最新rowや複数active rowから推定しない。Directorにも最大1件のactive Endだけを提示し、`complete_end_review`後に次を提示する。
 

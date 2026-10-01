@@ -12,6 +12,8 @@ import { endMeaning, startMeaning } from "../core/validation.ts";
 import type { CellManager } from "./cell-manager.ts";
 import { executePipeline, writeFixedResult } from "../runtime/pipeline.ts";
 
+type FixedResult = { resultRef: string; resultHash: string; manifestRef?: string; executionStatus: string };
+
 export class RuntimeManager {
   readonly db: DatabaseSync;
   readonly log: MachineLog;
@@ -142,6 +144,15 @@ export class RuntimeManager {
     try { chmodSync(path, stat.mode | 0o200); } catch {}
   }
 
+  private removeSnapshot(path: string): void {
+    this.makeWritable(path);
+    rmSync(path, { recursive: true, force: true });
+  }
+
+  private runtimeDirectory(runtime: { cell_no: number; runtime_no: number }): string {
+    return resolve(this.root, "works", `cell_${runtime.cell_no}`, `runtime_${runtime.runtime_no}`);
+  }
+
   private treeManifest(root: string): { hash: string; entries: Array<Record<string, unknown>> } {
     const entries: Array<Record<string, unknown>> = [];
     const visit = (path: string, relative: string): void => {
@@ -194,8 +205,7 @@ export class RuntimeManager {
       invariant(result.status === 0 && !result.error, "STARTER_PREFLIGHT_FAILED", `Starter preflight failed: ${result.error ?? result.stderr ?? `exit ${result.status}`}`);
       invariant(before === after, "STARTER_PREFLIGHT_MUTATED", "Starter modified the read-only preflight Snapshot");
     } finally {
-      this.makeWritable(preflight);
-      rmSync(preflight, { recursive: true, force: true });
+      this.removeSnapshot(preflight);
       rmSync(preflightOutput, { recursive: true, force: true });
     }
   }
@@ -234,7 +244,7 @@ export class RuntimeManager {
     invariant(runtime?.state === "created", "RUNTIME_START_CONFLICT", "Runtime is not in created state");
     const workPlace = resolve(this.root, "works", `cell_${start.cell_no}`, "work_place");
     invariant(existsSync(workPlace), "WORK_PLACE_MISSING", "Cell Work Place does not exist");
-    const runtimeDir = resolve(this.root, "works", `cell_${start.cell_no}`, `runtime_${start.runtime_no}`);
+    const runtimeDir = this.runtimeDirectory(start);
     const snapshot = resolve(runtimeDir, `snapshot-${start.runtime_no}`);
     mkdirSync(runtimeDir, { recursive: true });
     await this.runStarterPreflight(workPlace, runtimeDir, runtime.timeout_ms);
@@ -247,7 +257,7 @@ export class RuntimeManager {
       try {
         cpSync(workPlace, temporary, { recursive: true, errorOnExist: true });
       } catch (error) {
-        this.makeWritable(temporary); rmSync(temporary, { recursive: true, force: true });
+        this.removeSnapshot(temporary);
         transaction(this.db, () => this.db.prepare("UPDATE runtimes SET snapshot_state='none',snapshot_temporary_path=NULL WHERE runtime_id=? AND state='created' AND snapshot_state='copying' AND snapshot_temporary_path=?").run(runtime.runtime_id, temporary));
         throw error;
       }
@@ -267,7 +277,7 @@ export class RuntimeManager {
     } catch (error) {
       const current = this.db.prepare("SELECT state FROM runtimes WHERE runtime_id=?").get(runtime.runtime_id) as any;
       if (current?.state === "created" && existsSync(snapshot)) {
-        this.makeWritable(snapshot); rmSync(snapshot, { recursive: true, force: true });
+        this.removeSnapshot(snapshot);
         transaction(this.db, () => this.db.prepare("UPDATE runtimes SET snapshot_state='none',snapshot_temporary_path=NULL,snapshot_failure_class=NULL,snapshot_diagnostics_json=NULL WHERE runtime_id=? AND state='created'").run(runtime.runtime_id));
       }
       throw error;
@@ -300,66 +310,73 @@ export class RuntimeManager {
 
   async executeClaimed(runtimeId: string, executorToken: string): Promise<void> {
     const runtime = this.claimExecution(runtimeId, executorToken);
-    const runtimeDir = resolve(this.root, "works", `cell_${runtime.cell_no}`, `runtime_${runtime.runtime_no}`);
+    const runtimeDir = this.runtimeDirectory(runtime);
     const snapshot = resolve(runtimeDir, `snapshot-${runtime.runtime_no}`);
     const result = await executePipeline(snapshot, runtimeDir, runtime.timeout_ms);
-    const fixed = writeFixedResult(runtimeDir, runtimeId, result);
-    this.commitFixedResult(runtimeId, fixed, String((result as any).executionStatus));
+    this.finishResult(runtimeId, () => ({
+      ...writeFixedResult(runtimeDir, runtimeId, result), executionStatus: String(result.executionStatus),
+    }));
     this.drainWorkerDispatch();
     try { await this.cells.dispatchNextForCell(runtime.cell_no); }
     catch (error) { this.log.write("result_delivery_failed", { runtimeId, cellNo: runtime.cell_no, error: String(error) }); }
     await this.archive(runtimeId);
   }
 
-  private recoverOneFilesystemResult(runtime: any): boolean {
-    const dir = resolve(this.root, "works", `cell_${runtime.cell_no}`, `runtime_${runtime.runtime_no}`);
+  private readFilesystemResult(runtime: any): FixedResult | undefined {
+    const dir = this.runtimeDirectory(runtime);
     const resultRef = resolve(dir, "result.json"), manifestRef = resolve(dir, "result.manifest.json");
-    if (!existsSync(resultRef) || !existsSync(manifestRef)) return false;
-    let manifest: any, body: string, hash: string, result: any;
     try {
-      manifest = JSON.parse(readFileSync(manifestRef, "utf8"));
-      body = readFileSync(resultRef, "utf8");
-      hash = createHash("sha256").update(body).digest("hex");
-      result = JSON.parse(body);
-    } catch {
-      return false;
-    }
-    if (manifest.complete !== true || manifest.runtimeId !== runtime.runtime_id || manifest.resultHash !== hash) return false;
-    try {
-      this.commitFixedResult(runtime.runtime_id, { resultRef, resultHash: hash, manifestRef }, String(result.executionStatus));
-      return true;
-    } catch (error: any) {
-      if (error?.code === "RUNTIME_ALREADY_FINISHED") return true;
-      throw error;
-    }
+      const manifest = JSON.parse(readFileSync(manifestRef, "utf8"));
+      const body = readFileSync(resultRef, "utf8");
+      const hash = createHash("sha256").update(body).digest("hex");
+      const result = JSON.parse(body);
+      if (manifest.complete === true && manifest.runtimeId === runtime.runtime_id && manifest.resultHash === hash) {
+        return { resultRef, resultHash: hash, manifestRef, executionStatus: String(result.executionStatus) };
+      }
+    } catch {}
+    return undefined;
+  }
+
+  private recoverOneFilesystemResult(runtime: any): boolean {
+    return this.finishResult(runtime.runtime_id, current => this.readFilesystemResult(current));
   }
 
   private async finishWithSyntheticFailure(runtimeId: string, status: string, error: string): Promise<void> {
-    const runtime = this.db.prepare("SELECT * FROM runtimes WHERE runtime_id=?").get(runtimeId) as any;
-    if (!runtime || runtime.state === "finished") return;
-    const claimed = transaction(this.db, () => this.db.prepare("UPDATE runtimes SET state_version=state_version+1 WHERE runtime_id=? AND state!='finished' AND state_version=?").run(runtimeId, runtime.state_version));
-    if (claimed.changes !== 1) return;
-    const current = this.db.prepare("SELECT * FROM runtimes WHERE runtime_id=?").get(runtimeId) as any;
-    if (!current || current.state === "finished" || this.recoverOneFilesystemResult(current)) return;
-    const dir = resolve(this.root, "works", `cell_${current.cell_no}`, `runtime_${current.runtime_no}`);
-    if (existsSync(dir)) for (const name of readdirSync(dir)) {
-      if (/^result(?:\.manifest)?\.json\..+\.tmp$/.test(name)) rmSync(resolve(dir, name), { force: true });
-    }
-    const fixed = writeFixedResult(dir, runtimeId, { schemaVersion: 1, executionStatus: status, error, stages: {} });
-    this.commitFixedResult(runtimeId, fixed, status);
+    this.finishResult(runtimeId, runtime => {
+      const recovered = this.readFilesystemResult(runtime);
+      if (recovered) return recovered;
+      const dir = this.runtimeDirectory(runtime);
+      if (existsSync(dir)) for (const name of readdirSync(dir)) {
+        if (/^result(?:\.manifest)?\.json\..+\.tmp$/.test(name)) rmSync(resolve(dir, name), { force: true });
+      }
+      return {
+        ...writeFixedResult(dir, runtimeId, { schemaVersion: 1, executionStatus: status, error, stages: {} }),
+        executionStatus: status,
+      };
+    });
+  }
+
+  // BEGIN IMMEDIATE serializes publication as well as DB completion across processes.
+  // Keep prepare synchronous: an unfinished Runtime must never publish outside this transaction.
+  private finishResult(runtimeId: string, prepare: (runtime: any) => FixedResult | undefined): boolean {
+    const fixed = transaction(this.db, () => {
+      const runtime = this.db.prepare("SELECT * FROM runtimes WHERE runtime_id=?").get(runtimeId) as any;
+      if (!runtime || runtime.state === "finished") return undefined;
+      const result = prepare(runtime);
+      if (!result) return undefined;
+      const contextId = randomUUID();
+      this.db.prepare("UPDATE runtimes SET state='finished',result_ref=?,result_hash=?,execution_status=?,state_version=state_version+1 WHERE runtime_id=?").run(result.resultRef, result.resultHash, result.executionStatus, runtimeId);
+      this.db.prepare("INSERT INTO ends(runtime_id,state,created_at) VALUES(?,'meaning_pending',?)").run(runtimeId, Date.now());
+      this.db.prepare("INSERT INTO result_contexts VALUES(?,?,'dispatch_pending',?)").run(contextId, runtimeId, Date.now());
+      this.db.prepare("INSERT INTO worker_dispatch VALUES(?,'result',?,?,10,'pending',?)").run(contextId, runtime.cell_no, json({ contextId, runtimeId, resultRef: result.resultRef }), Date.now());
+      return result;
+    });
+    if (fixed) this.log.write("runtime_finished", { runtimeId, resultRef: fixed.resultRef, executionStatus: fixed.executionStatus });
+    return fixed !== undefined;
   }
 
   commitFixedResult(runtimeId: string, fixed: { resultRef: string; resultHash: string; manifestRef?: string }, executionStatus: string): void {
-    transaction(this.db, () => {
-      const runtime = this.db.prepare("SELECT * FROM runtimes WHERE runtime_id=?").get(runtimeId) as any;
-      invariant(runtime && runtime.state !== "finished", "RUNTIME_ALREADY_FINISHED", "Runtime is already finished");
-      const contextId = randomUUID();
-      this.db.prepare("UPDATE runtimes SET state='finished',result_ref=?,result_hash=?,execution_status=?,state_version=state_version+1 WHERE runtime_id=?").run(fixed.resultRef, fixed.resultHash, executionStatus, runtimeId);
-      this.db.prepare("INSERT INTO ends(runtime_id,state,created_at) VALUES(?,'meaning_pending',?)").run(runtimeId, Date.now());
-      this.db.prepare("INSERT INTO result_contexts VALUES(?,?,'dispatch_pending',?)").run(contextId, runtimeId, Date.now());
-      this.db.prepare("INSERT INTO worker_dispatch VALUES(?,'result',?,?,10,'pending',?)").run(contextId, runtime.cell_no, json({ contextId, runtimeId, resultRef: fixed.resultRef }), Date.now());
-    });
-    this.log.write("runtime_finished", { runtimeId, resultRef: fixed.resultRef, executionStatus });
+    invariant(this.finishResult(runtimeId, () => ({ ...fixed, executionStatus })), "RUNTIME_ALREADY_FINISHED", "Runtime is already finished");
   }
 
   createEndAssignment(sessionToken: string, rawMeaning: unknown): { endAssignmentId: string; sequence: number } {
@@ -541,7 +558,7 @@ export class RuntimeManager {
   async archive(runtimeId: string): Promise<void> {
     const runtime = this.db.prepare("SELECT * FROM runtimes WHERE runtime_id=?").get(runtimeId) as any;
     if (!runtime || (runtime.archive_state === "fixed" && runtime.cleanup_state === "complete")) return;
-    const dir = resolve(this.root, "works", `cell_${runtime.cell_no}`, `runtime_${runtime.runtime_no}`), snapshotName = `snapshot-${runtime.runtime_no}`;
+    const dir = this.runtimeDirectory(runtime), snapshotName = `snapshot-${runtime.runtime_no}`;
     const snapshot = resolve(dir, snapshotName);
     const attempts: Array<Record<string, unknown>> = [];
     const temporary = resolve(dir, `${snapshotName}.tar.zst.${randomUUID()}.tmp`), final = resolve(dir, `${snapshotName}.tar.zst`);
@@ -550,8 +567,7 @@ export class RuntimeManager {
         invariant(existsSync(final), "ARCHIVE_MISSING", "Fixed archive is missing; preserve Snapshot");
         const check = spawnSync("tar", ["-tf", final], { encoding: "utf8", windowsHide: true });
         invariant(check.status === 0 && check.stdout.split(/\r?\n/).some(name => name === `${snapshotName}/` || name === snapshotName), "ARCHIVE_INVALID", "Fixed archive is unreadable or has the wrong Snapshot root; preserve Snapshot");
-        this.makeWritable(snapshot);
-        rmSync(snapshot, { recursive: true, force: true });
+        this.removeSnapshot(snapshot);
         transaction(this.db, () => this.db.prepare("UPDATE runtimes SET cleanup_state='complete',archive_diagnostics_json=NULL WHERE runtime_id=?").run(runtimeId));
       } catch (cleanupError) {
         transaction(this.db, () => this.db.prepare("UPDATE runtimes SET cleanup_state='failed',archive_diagnostics_json=? WHERE runtime_id=?").run(json({ stage: "cleanup", error: String(cleanupError), recordedAt: Date.now() }), runtimeId));
@@ -602,7 +618,7 @@ export class RuntimeManager {
       WHERE r.state='created' AND r.snapshot_state IN('none','commit_pending')`).all() as any[];
     let recovered = 0;
     for (const runtime of rows) {
-      const runtimeDir = resolve(this.root, "works", `cell_${runtime.cell_no}`, `runtime_${runtime.runtime_no}`);
+      const runtimeDir = this.runtimeDirectory(runtime);
       const snapshot = resolve(runtimeDir, `snapshot-${runtime.runtime_no}`);
       if (!existsSync(snapshot)) continue;
       try {
@@ -622,13 +638,13 @@ export class RuntimeManager {
         this.validateExperiment(snapshot);
         this.freezeSnapshot(snapshot);
       } catch (error) {
-        this.makeWritable(snapshot); rmSync(snapshot, { recursive: true, force: true });
+        this.removeSnapshot(snapshot);
         this.db.prepare("UPDATE runtimes SET snapshot_state='none' WHERE runtime_id=? AND state='created'").run(runtime.runtime_id);
         this.log.write("orphan_snapshot_rejected", { runtimeId: runtime.runtime_id, error: String(error) });
         continue;
       }
       if (this.cells.workerItemState("start", runtime.start_id) !== "active") {
-        this.makeWritable(snapshot); rmSync(snapshot, { recursive: true, force: true });
+        this.removeSnapshot(snapshot);
         this.log.write("stale_snapshot_discarded", { runtimeId: runtime.runtime_id });
         continue;
       }
@@ -641,14 +657,14 @@ export class RuntimeManager {
       }));
       if (adopted === true) {
         if (runtime.snapshot_temporary_path && existsSync(runtime.snapshot_temporary_path)) {
-          this.makeWritable(runtime.snapshot_temporary_path); rmSync(runtime.snapshot_temporary_path, { recursive: true, force: true });
+          this.removeSnapshot(runtime.snapshot_temporary_path);
         }
         this.cells.completeItemBySource("start", runtime.start_id);
         this.log.write("snapshot_recovered", { runtimeId: runtime.runtime_id });
         recovered++;
       } else {
         const current = this.db.prepare("SELECT state FROM runtimes WHERE runtime_id=?").get(runtime.runtime_id) as any;
-        if (current?.state === "created" && existsSync(snapshot)) { this.makeWritable(snapshot); rmSync(snapshot, { recursive: true, force: true }); }
+        if (current?.state === "created" && existsSync(snapshot)) { this.removeSnapshot(snapshot); }
       }
     }
     return recovered;
