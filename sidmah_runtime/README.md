@@ -12,6 +12,8 @@ SIDMAHのCell、Runtime、Assignment配送と状態を管理する。Node.js 24�
 
 project rootの`mcp-config.json`がMCP設定の入力である。`worker-model.json`の`model`と`reasoning_effort`をCell Assignment作成時に読み、Directorへ`workerModel`と`reasoningEffort`として返す。WorkerのEnd Assignmentには出力の確認内容と方法を`outputAudit`として含める。
 
-標準providerはStart、Result、Endを`state/provider-outbox/delivery/`へ記録し、Codex CLIの`queue`で既存のWorker／Directorチャットへ通知した後、app-server proxyで対象チャットをresumeする。対応するMCP tool callを受信した時点で処理開始を確定する。稼働中の配送失敗と受信未確認には回数を限った再試行を行い、失敗は`last_error`とmachine logに残す。詳細と制約は`docs/provider-contract.md`を参照する。MCP tool callの`_meta.threadId`をcaller identityの入口としてManager DBから内部sessionを解決する。MCPのinitialize、ping、tools/listではcaller identityを要求しない。Manager初期化とrecoveryはtool call時まで遅延する。
+既定providerは`collaboration`方式でStart、Result、Endを`state/provider-outbox/delivery/`へ保存する。Directorは`create_start_assignment`の返す通知と`get_pending_deliveries`を使い、内部サブエージェントのWorkerへ専用の`followup_task`で通知する。保存やpollだけでは処理開始にならず、対応するMCP tool callの受信で確定する。独立した通常チャット向けの旧queue方式はproject rootの`provider-config.json`に`{"mode":"codex-queue"}`を指定した場合だけ使う。内部サブエージェントに旧方式を使わない。設定変更はMCP再起動後に反映する。詳細は`docs/provider-contract.md`を参照する。
+
+MCP tool callの`_meta.threadId`をcaller identityの入口としてManager DBから内部sessionを解決する。MCPのinitialize、ping、tools/listではcaller identityを要求しない。Manager初期化とrecoveryはtool call時まで遅延する。
 
 SQLiteとmachine logはproject rootの`state/`、Cellの作業物、Snapshot、Resultは`works/`へ実行時に生成する。これらは初期配置に含めない。稼働中のSQLiteを保全するときはstate export経路を使用する。

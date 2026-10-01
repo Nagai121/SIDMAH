@@ -13,7 +13,21 @@ Provider境界が扱うのは次だけである。
 
 ManagerのSQLiteがdurable state、dedupe、Binding、fence、active slotの正本であり、provider process memoryは正本にしない。
 
-## Codex配送アダプター
+## 内部サブエージェントの配送（既定）
+
+project rootに`provider-config.json`がなければ`collaboration`方式を使う。明示する場合は`{"mode":"collaboration"}`。MCP serverと独立executorは同じ選択関数を使う。run中は設定を変更せず、変更後はMCPを再起動する。
+
+既定providerはOutboxProviderで、通知のdurable enqueueまでを担当する。`accepted: true, processingStarted: false`はoutbox保存の受付であり、Workerへの通知成功や計算開始の証明ではない。Managerは対応するslotをsubmittedとして保持する。`codex queue`、`thread/resume`、`thread/archive`は内部サブエージェントに呼ばない。
+
+DirectorはCellと起動したサブエージェント名の対応を保持し、`create_start_assignment`が返す`deliveries`を対応するWorkerへの`followup_task`で渡す。Runtime実行中は`get_pending_deliveries`でResult通知を確認して同じWorkerへ渡す。WorkerのEnd通知はDirector自身が同toolから取得しreviewする。これらの専用連携操作は親エージェントが実行する。Node providerが専用ツールを直接呼ぶことはない。親が動作していない間の自動wakeは提供しない。
+
+`get_pending_deliveries`は現在のsubmitted slotだけを返し、取得自体ではclaimしない。Workerには自身のcurrent Bindingの通知だけ、Directorには自身のactive runのWorker通知と自身宛てEndだけを返す。古いoutboxファイルを全件再配送しない。正常な`starter`、`create_end_assignment`、`complete_end_review`によって初めてactiveへ進む。連携通知が失敗した場合もsubmittedのままで、同じdeliveryを再通知できる。既存のfence、source、session照合と二重実行防止を維持する。
+
+終了要求はoutboxのterminate/へ保存する。Directorは`director_end`後に自身が起動したWorkerを専用のinterrupt操作で停止する。outboxへの終了要求保存を、実際のサブエージェント停止済みと報告してはいけない。
+
+## 通常チャットのCodex配送アダプター（明示選択）
+
+独立した通常チャットをWorkerにする統合では`provider-config.json`に`{"mode":"codex-queue"}`を指定する。内部サブエージェントはこの方式の対応対象ではない。拒否時に成功扱いへ自動fallbackしない。
 
 標準の`CodexQueueProvider`は、まず上記delivery JSONを固定し、`codex queue --thread <providerSessionId> --message <固定通知>`を呼ぶ。通知にはdelivery IDと参照先を含める。`queued/<deliveryId>.json`はqueue成功の記録であり、同じ配送試行のwake失敗ではqueueを重複させない。次に`codex app-server proxy`経由で`initialize`と`thread/resume`を送り、休止中の対象チャットを起こす。CLIが失敗したときはManagerのitemをpendingへ戻し、`last_error`とmachine logに残す。起動時のrecoveryや別のMCP操作はこの配送失敗に巻き込まない。
 

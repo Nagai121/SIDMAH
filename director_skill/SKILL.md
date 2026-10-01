@@ -37,4 +37,6 @@ project rootの`worker-model.json`にあるWorkerモデルとともに、適用�
 
 WorkerはDirectorが起動する。`create_cell_assignment`が返す`workerModel`と`reasoningEffort`を使用し、ユーザーが明示的に変更した場合だけ別設定を使う。起動したWorkerには最初に`accept_cell_assignment`を呼ばせる。
 
+既定の`collaboration`配送ではWorkerを内部サブエージェントとして起動する。Cellとサブエージェント名の対応を保持する。`create_start_assignment`が返す`deliveries`のWorker通知を、対応するサブエージェントへの`followup_task`で渡す。Runtime引渡し後は`get_pending_deliveries`を確認し、Result通知を同じWorkerへ渡す。待機には短いsleepまたはagent待機を使い、Runtimeに独自の時間制限を加えない。WorkerがEndを提出したらDirector自身宛てのEnd通知を取得してreviewする。通知を読んだだけで処理開始や完了とみなさない。Director終了時は`director_end`に加え、このrunで起動したWorkerを専用連携操作で停止する。詳細は`../sidmah_runtime/docs/provider-contract.md`。
+
 Assignment番号、Worker番号、Runtime番号、timestamp、Binding、fence、sequenceを生成・再出力しない。必要な機械情報はMCP toolが返した値だけを使用する。

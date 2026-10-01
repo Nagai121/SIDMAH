@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { invariant } from "./core/errors.ts";
-import type { ProviderHarness } from "./core/types.ts";
+import type { ProviderHarness, ProviderDeliveryRequest } from "./core/types.ts";
+import { deliveryMessage } from "./provider/outbox-provider.ts";
+import { deliveryMode } from "./provider/configured-provider.ts";
 import { CellManager } from "./manager/cell-manager.ts";
 import { RuntimeManager } from "./manager/runtime-manager.ts";
 import { SessionController } from "./session/session-controller.ts";
@@ -42,7 +44,43 @@ export class SidmahSystem {
   }
   async createStart(context: CallerContext, cellNo: number, meaning: unknown, timeoutMs?: number) {
     const output = this.runtimes.createStartAssignment(context.sessionToken, cellNo, meaning, timeoutMs);
-    await this.pump(); return output;
+    await this.pump(); return { ...output, ...this.pendingDeliveries(context) };
+  }
+
+  /** Read only current, scoped inbox slots; never claim or acknowledge on a poll. */
+  pendingDeliveries(context: CallerContext) {
+    const caller = this.cells.caller(context.sessionToken);
+    invariant(caller.status === "active", "CALLER_NOT_ACTIVE", "Caller session is not active");
+    invariant(caller.provider_session_id === context.providerSessionId, "CALLER_CONTEXT_MISMATCH", "Caller identity does not match session");
+    const rows = this.cells.db.prepare(`SELECT i.* FROM worker_slots s
+      JOIN worker_inbox i ON i.item_id=s.item_id
+      JOIN workers w ON w.worker_id=i.worker_id AND w.status='active'
+      JOIN bindings b ON b.worker_id=w.worker_id AND b.cell_no=i.cell_no AND b.status='current'
+      WHERE w.run_id=? AND s.session_id=w.provider_session_id AND i.session_id=s.session_id
+        AND s.phase='submitted' AND i.state='submitted' AND i.kind IN('start','result')
+        AND (?='director' OR w.worker_id=?) ORDER BY i.priority,i.created_at`).all(caller.run_id, caller.kind, caller.worker_id) as any[];
+    const deliveries: (ProviderDeliveryRequest & { message: string; cellNo?: number })[] = rows.map(row => {
+      const request: ProviderDeliveryRequest = { deliveryId: row.delivery_id, providerSessionId: row.session_id, kind: row.kind, payload: JSON.parse(row.payload_json) };
+      return { ...request, cellNo: row.cell_no, message: deliveryMessage(request) };
+    });
+    if (caller.kind === "director") {
+      const ends = this.runtimes.db.prepare(`SELECT i.* FROM director_slots s JOIN director_inbox i ON i.item_id=s.item_id
+        WHERE s.run_id=? AND s.phase='submitted' AND i.state='submitted'
+          AND i.target_run_id=? AND i.target_provider_session_id=?`).all(caller.run_id, caller.run_id, context.providerSessionId) as any[];
+      for (const row of ends) {
+        const request: ProviderDeliveryRequest = { deliveryId: row.delivery_id, providerSessionId: row.target_provider_session_id, kind: "end", payload: JSON.parse(row.payload_json) };
+        deliveries.push({ ...request, message: deliveryMessage(request) });
+      }
+    }
+    return { deliveryMode: deliveryMode(this.root), deliveries };
+  }
+
+  async getPendingDeliveries(context: CallerContext) {
+    const caller = this.cells.caller(context.sessionToken);
+    invariant(caller.status === "active", "CALLER_NOT_ACTIVE", "Caller session is not active");
+    invariant(caller.provider_session_id === context.providerSessionId, "CALLER_CONTEXT_MISMATCH", "Caller identity does not match session");
+    await this.pump();
+    return this.pendingDeliveries(context);
   }
   async starter(context: CallerContext) { const output = await this.runtimes.starter(context.sessionToken); await this.pump(); return output; }
   async createEnd(context: CallerContext, meaning: unknown) { const output = this.runtimes.createEndAssignment(context.sessionToken, meaning); await this.pump(); return output; }
