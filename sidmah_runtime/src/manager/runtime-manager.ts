@@ -208,9 +208,6 @@ export class RuntimeManager {
       if (waits[index]) await delay(waits[index]);
       const attemptedAt = Date.now();
       try {
-        if (process.env.SIDMAH_TEST_FAIL_SNAPSHOT_RENAME === "1") {
-          const injected: any = new Error("Injected snapshot rename failure"); injected.code = "EPERM"; throw injected;
-        }
         renameSync(temporary, snapshot);
         attempts.push({ attempt: index + 1, attemptedAt, ok: true });
         return;
@@ -546,8 +543,6 @@ export class RuntimeManager {
     if (!runtime || (runtime.archive_state === "fixed" && runtime.cleanup_state === "complete")) return;
     const dir = resolve(this.root, "works", `cell_${runtime.cell_no}`, `runtime_${runtime.runtime_no}`), snapshotName = `snapshot-${runtime.runtime_no}`;
     const snapshot = resolve(dir, snapshotName);
-    const forcedArchiveStage = process.env.SIDMAH_TEST_FAIL_ARCHIVE_STAGE
-      ?? (existsSync(resolve(snapshot, "SIDMAH_TEST_FORCE_ARCHIVE_FAILURE")) ? "prepare" : undefined);
     const attempts: Array<Record<string, unknown>> = [];
     const temporary = resolve(dir, `${snapshotName}.tar.zst.${randomUUID()}.tmp`), final = resolve(dir, `${snapshotName}.tar.zst`);
     const cleanup = () => {
@@ -555,7 +550,6 @@ export class RuntimeManager {
         invariant(existsSync(final), "ARCHIVE_MISSING", "Fixed archive is missing; preserve Snapshot");
         const check = spawnSync("tar", ["-tf", final], { encoding: "utf8", windowsHide: true });
         invariant(check.status === 0 && check.stdout.split(/\r?\n/).some(name => name === `${snapshotName}/` || name === snapshotName), "ARCHIVE_INVALID", "Fixed archive is unreadable or has the wrong Snapshot root; preserve Snapshot");
-        if (forcedArchiveStage === "cleanup") throw new Error("Injected archive cleanup failure");
         this.makeWritable(snapshot);
         rmSync(snapshot, { recursive: true, force: true });
         transaction(this.db, () => this.db.prepare("UPDATE runtimes SET cleanup_state='complete',archive_diagnostics_json=NULL WHERE runtime_id=?").run(runtimeId));
@@ -571,10 +565,8 @@ export class RuntimeManager {
     for (let attempt=1; attempt<=3; attempt++) {
       try {
         if (existsSync(temporary)) rmSync(temporary, { force: true });
-        if (forcedArchiveStage === "prepare") throw new Error("Injected archive prepare failure");
         const result = spawnSync("tar", ["-caf", temporary, "-C", dir, snapshotName], { windowsHide: true });
         if (result.status !== 0 || !existsSync(temporary)) throw new Error(`tar failed: status=${result.status}; ${result.stderr?.toString() ?? ""}`);
-        if (forcedArchiveStage === "rename") throw new Error("Injected archive rename failure");
         renameSync(temporary, final);
         transaction(this.db, () => this.db.prepare("UPDATE runtimes SET archive_state='fixed' WHERE runtime_id=?").run(runtimeId));
         cleanup();
