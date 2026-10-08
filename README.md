@@ -1,6 +1,6 @@
 # SIDMAH
 
-現在のバージョン: **v1.0.4**
+現在のバージョン: **v1.0.5**
 SIDMAHは、ユーザーから与えられた目的に基づいて計算実験を構築・実行・監査するためのマルチエージェント・ハーネスです。
 
 ## Setup
@@ -43,6 +43,8 @@ Field Control
 本番実験
 ↓
 結果評価
+↓
+Queryごとの成果物をquery_outputs/へ保存
 ```
 
 Field Controlでは、本番実験へ進む前に実験系が成立していることを確認します。
@@ -71,14 +73,12 @@ SIDMAH/
 │   │   ├── director-succession.md
 │   │   ├── query-understanding.md
 │   │   └── sim-understanding.md
-│   ├── fieldcontrol/
-│   │   ├── fieldcontrol.md
-│   │   ├── system_fc.md
-│   │   ├── experiment_fc.md
-│   │   └── gate3_record/
-│   │       └── gate3-record-schema.md
-│   └── summary/
-│       └── summary-schema.md
+│   └── fieldcontrol/
+│       ├── fieldcontrol.md
+│       ├── system_fc.md
+│       ├── experiment_fc.md
+│       └── gate3_record/
+│           └── gate3-record-schema.md
 │
 ├── worker_skill/
 │   ├── SKILL.md
@@ -87,6 +87,9 @@ SIDMAH/
 │   ├── experiment-schema.json
 │   └── summary/
 │       └── summary-schema.md
+│
+├── query_outputs/
+│   └── outputs_schema.md
 │
 ├── sidmah_runtime/
 │   ├── package.json

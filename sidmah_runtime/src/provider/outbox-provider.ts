@@ -129,7 +129,7 @@ function codexThreadOperation(threadId: string, method: "thread/resume" | "threa
         if (!/^HTTP\/1\.1 101\b/.test(status)) return finish(new Error(`Codex WebSocket upgrade failed: ${status.split("\r\n")[0]}`));
         upgraded = true;
         buffered = buffered.subarray(end + 4);
-        send({ id: 1, method: "initialize", params: { clientInfo: { name: "sidmah", title: "SIDMAH", version: "1.0.4" } } });
+        send({ id: 1, method: "initialize", params: { clientInfo: { name: "sidmah", title: "SIDMAH", version: "1.0.5" } } });
       }
       while (buffered.length >= 2 && !settled) {
         const first = buffered[0], second = buffered[1], opcode = first & 0x0f;

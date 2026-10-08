@@ -12,4 +12,4 @@ Runtime実験が必要なら`../../assignment_schema/start.schema.json`に従い
 
 End Assignmentを受けたら結果、監査方法、異常をQueryに照らして評価する。失敗と判断不能も正規の結果として扱う。評価後に`complete_end_review`を呼び、次の実験または最終回答を決める。失敗後に再試行するなら前回からの変更点または新たに確認する点を明確にする。Query回答に直接必要な場合だけ新しいRuntimeを作る。
 
-回答を構成できたら`../summary/summary-schema.md`に従う。Director sessionを終了するときは`director_end`を呼ぶ。代替わりには`./director-succession.md`を適用する。
+回答を構成できたら`../../query_outputs/outputs_schema.md`に従う。Director sessionを終了するときは`director_end`を呼ぶ。代替わりには`./director-succession.md`を適用する。

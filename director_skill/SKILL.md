@@ -26,6 +26,8 @@ project rootの`worker-model.json`にあるWorkerモデルとともに、適用�
 
 番号付き処理が残っていなければ、MCP tool `director_start`でDirector runを成立させる。このsessionがすでにactive Directorとして登録済みなら呼び直さない。通常の判断とQueryから回答までの流れは`./references/director.md`に従う。
 
+DirectorはQueryの達成条件を満たすまで、自律的に実験と評価を継続する。達成できず実行を終了する場合は、その理由と未達成項目を明示する。
+
 - Queryの理解・変更: `./references/query-understanding.md`、`../session/query.md`
 - Simulatorの配置・理解・変更: `./references/sim-understanding.md`、`../simulator/SIMULATOR_PLACEMENT.md`、`../session/simulator.md`
 - Field Control: `./fieldcontrol/fieldcontrol.md`。Gate 1/2は`./fieldcontrol/system_fc.md`、Gate 3は`./fieldcontrol/experiment_fc.md`、Gate 3の記録は`./fieldcontrol/gate3_record/gate3-record-schema.md`
@@ -33,7 +35,7 @@ project rootの`worker-model.json`にあるWorkerモデルとともに、適用�
 - Cell Assignment: `../assignment_schema/cell.schema.json`とMCP tool `create_cell_assignment`
 - Start Assignment: `../assignment_schema/start.schema.json`とMCP tool `create_start_assignment`
 - Endの評価: `../assignment_schema/end.schema.json`とMCP tool `complete_end_review`
-- 最終回答・実験レポート: `./summary/summary-schema.md`
+- 最終回答・実験レポート: `../query_outputs/outputs_schema.md`
 
 WorkerはDirectorが起動する。`create_cell_assignment`が返す`workerModel`と`reasoningEffort`を使用し、ユーザーが明示的に変更した場合だけ別設定を使う。起動したWorkerには最初に`accept_cell_assignment`を呼ばせる。
 
