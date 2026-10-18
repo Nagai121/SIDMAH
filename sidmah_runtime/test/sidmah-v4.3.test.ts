@@ -43,6 +43,7 @@ function setup() {
   writeFileSync(resolve(root, "worker-model.json"), JSON.stringify({ model: "gpt-5.6-luna", reasoning_effort: "low" }));
   const provider = new InMemoryProvider(), system = new SidmahSystem(root, provider);
   system.startDirector(director);
+  system.registerQuery(director, "fixture-v43-query", "Fixture Query");
   return { root, provider, system, cleanup: () => { try { system.close(); } catch {}; writable(root); rmSync(root, { recursive: true, force: true, maxRetries: 4, retryDelay: 50 }); } };
 }
 

@@ -7,6 +7,8 @@ import { deliveryMode } from "./provider/configured-provider.ts";
 import { CellManager } from "./manager/cell-manager.ts";
 import { RuntimeManager } from "./manager/runtime-manager.ts";
 import { SessionController } from "./session/session-controller.ts";
+import { IntegratedStore } from "./knowledge/integrated.ts";
+import { onCommitted } from "./core/db.ts";
 
 export interface CallerContext { sessionToken: string; providerSessionId: string }
 
@@ -15,11 +17,31 @@ export class SidmahSystem {
   readonly sessions: SessionController;
   readonly cells: CellManager;
   readonly runtimes: RuntimeManager;
+  readonly knowledge?: IntegratedStore;
+  private readonly unlinkCommitHooks: Array<() => void> = [];
+  private pendingIntegrationSync?: ReturnType<typeof setImmediate>;
+  private logIntegrationFailure(event: string, error: unknown): void {
+    try { this.cells.log.write(event, { error: String(error) }); }
+    catch { /* An integration/logging failure must not stop the original manager. */ }
+  }
   constructor(root: string, provider: ProviderHarness) {
     this.root = root;
     this.sessions = new SessionController(provider);
     this.cells = new CellManager(root, this.sessions);
     this.runtimes = new RuntimeManager(root, this.cells, this.sessions);
+    try {
+      this.knowledge = new IntegratedStore(root, this.cells.db, this.runtimes.db);
+      const sync = () => {
+        if (this.pendingIntegrationSync) return;
+        // Several successful source COMMITs in one turn need only one derived snapshot.
+        this.pendingIntegrationSync = setImmediate(() => {
+          this.pendingIntegrationSync = undefined;
+          try { this.knowledge?.sync(); }
+          catch (error) { this.logIntegrationFailure("integrated_sync_retry_pending", error); }
+        });
+      };
+      this.unlinkCommitHooks.push(onCommitted(this.cells.db, sync), onCommitted(this.runtimes.db, sync));
+    } catch (error) { this.logIntegrationFailure("integrated_unavailable", error); }
   }
 
   contextForProviderSession(providerSessionId: string, allowUnregistered = false): CallerContext {
@@ -43,7 +65,9 @@ export class SidmahSystem {
     await this.pump(); return output;
   }
   async createStart(context: CallerContext, cellNo: number, meaning: unknown, timeoutMs?: number) {
-    const output = this.runtimes.createStartAssignment(context.sessionToken, cellNo, meaning, timeoutMs);
+    invariant(this.knowledge, "INTEGRATED_UNAVAILABLE", "Integrated DB is required for Query-linked Start");
+    this.knowledge.currentQuery();
+    const output = this.runtimes.createStartAssignment(context.sessionToken, cellNo, meaning, timeoutMs, id => this.knowledge!.bindRuntime(id));
     await this.pump(); return { ...output, ...this.pendingDeliveries(context) };
   }
 
@@ -97,6 +121,23 @@ export class SidmahSystem {
     await this.cells.endWorkerSessionByProviderId(providerSessionId, reason);
   }
 
+  registerQuery(context: CallerContext, operationKey: string, content: string, queryNo?: number) {
+    const caller = this.cells.caller(context.sessionToken);
+    invariant(caller.kind === "director" && caller.status === "active", "DIRECTOR_NOT_ACTIVE", "Only the active Director can register a Query");
+    invariant(this.knowledge, "INTEGRATED_UNAVAILABLE", "Integrated DB is unavailable");
+    return this.knowledge.registerQuery(operationKey, content, queryNo);
+  }
+  listIntegratedSessions(context: CallerContext) {
+    invariant(this.cells.caller(context.sessionToken).status === "active", "CALLER_NOT_ACTIVE", "Active session required");
+    invariant(this.knowledge, "INTEGRATED_UNAVAILABLE", "Integrated DB is unavailable");
+    return this.knowledge.listSessions();
+  }
+  queryIntegratedSQL(context: CallerContext, sessionId: string, sql: string, parameters?: Array<string | number | null>) {
+    invariant(this.cells.caller(context.sessionToken).status === "active", "CALLER_NOT_ACTIVE", "Active session required");
+    invariant(this.knowledge, "INTEGRATED_UNAVAILABLE", "Integrated DB is unavailable");
+    return this.knowledge.querySQL(sessionId, sql, parameters);
+  }
+
   async pump(): Promise<void> {
     this.runtimes.drainWorkerDispatch();
     for (const cellNo of this.cells.currentBoundCellNumbers()) {
@@ -106,8 +147,12 @@ export class SidmahSystem {
     try { await this.runtimes.dispatchNextDirector(); }
     catch (error) { this.runtimes.log.write("director_delivery_failed", { error: String(error) }); }
   }
-  async recover(): Promise<void> { await this.cells.recover(); await this.runtimes.recover(); }
-  close(): void { this.runtimes.close(); this.cells.close(); }
+  async recover(): Promise<void> {
+    await this.cells.recover(); await this.runtimes.recover();
+    try { this.knowledge?.sync(); }
+    catch (error) { this.logIntegrationFailure("integrated_sync_retry_pending", error); }
+  }
+  close(): void { if (this.pendingIntegrationSync) clearImmediate(this.pendingIntegrationSync); for (const unlink of this.unlinkCommitHooks) unlink(); this.knowledge?.close(); this.runtimes.close(); this.cells.close(); }
 }
 
 export function environmentProviderSessionId(): string | undefined {

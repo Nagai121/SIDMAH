@@ -9,11 +9,23 @@ export function openDb(path: string): DatabaseSync {
   return db;
 }
 
+const commitListeners = new WeakMap<DatabaseSync, Set<() => void>>();
+export function onCommitted(db: DatabaseSync, listener: () => void): () => void {
+  let listeners = commitListeners.get(db);
+  if (!listeners) { listeners = new Set(); commitListeners.set(db, listeners); }
+  listeners.add(listener);
+  return () => listeners!.delete(listener);
+}
+
 export function transaction<T>(db: DatabaseSync, body: () => T): T {
   db.exec("BEGIN IMMEDIATE");
   try {
     const value = body();
     db.exec("COMMIT");
+    // The source transaction has succeeded: integration failures cannot undo it.
+    for (const listener of commitListeners.get(db) ?? []) {
+      try { listener(); } catch { /* retry on recovery or a later commit */ }
+    }
     return value;
   } catch (error) {
     try { db.exec("ROLLBACK"); } catch {}

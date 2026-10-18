@@ -34,6 +34,7 @@ DirectorはQueryの達成条件を満たすまで、自律的に実験と評価�
 - Directorの代替わり: `./references/director-succession.md`
 - Cell Assignment: `../assignment_schema/cell.schema.json`とMCP tool `create_cell_assignment`
 - Start Assignment: `../assignment_schema/start.schema.json`とMCP tool `create_start_assignment`
+- 統合DBの検索: MCP `list_integrated_sessions`でUUIDを選び、`query_integrated_sql`で読み取り専用SQLを実行する。外部DBから元セッションのファイルパスを辿らない。
 - Endの評価: `../assignment_schema/end.schema.json`とMCP tool `complete_end_review`
 - 最終回答・実験レポート: `../query_outputs/outputs_schema.md`
 

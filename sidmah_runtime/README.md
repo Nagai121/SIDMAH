@@ -17,3 +17,13 @@ project rootの`mcp-config.json`がMCP設定の入力である。`worker-model.j
 MCP tool callの`_meta.threadId`をcaller identityの入口としてManager DBから内部sessionを解決する。MCPのinitialize、ping、tools/listではcaller identityを要求しない。Manager初期化とrecoveryはtool call時まで遅延する。
 
 SQLiteとmachine logはproject rootの`state/`、Cellの作業物、Snapshot、Resultは`works/`へ実行時に生成する。これらは初期配置に含めない。稼働中のSQLiteを保全するときはstate export経路を使用する。
+
+## Integrated SQLite / SQL RAG
+
+派生データベース`state/integrated.sqlite`には既存のCell/Runtime DB、Query履歴、および`result.json`が統合されます。外部CSVやSnapshotなどの生データは統合しません。
+
+MCP `register_query`でQuery全文を保存します。新規なら`queryNo`を省略し、改訂なら既存の番号を指定します。再試行には同じ`operationKey`を使用し、各RuntimeのQuery RevisionはStart時点で固定されます。
+
+MCP `list_integrated_sessions`で現在のDBと`shared_databases/`にユーザーが配置した外部SQLiteを一覧化できます。DB内のセッションUUIDを指定して`query_integrated_sql`で読み取り専用SQLを実行します。`search_fts`はQuery・Start・End・result.jsonを対象とするFTS5索引です。外部セッションのファイルパスは有効な参照先ではありません。稼働中のDBを共有する場合はSQLiteの整合性のあるバックアップを配置してください。
+
+Node.js 24.10以上が必要です。Embeddingモデルとベクトル検索拡張は使用しません。

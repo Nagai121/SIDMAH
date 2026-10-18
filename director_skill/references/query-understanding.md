@@ -8,3 +8,5 @@
 4. **契約**：固定条件、禁止条件、資源・回数・方法などの制約。指定のない事項に制約を加えない。
 
 整理した意味をユーザーへ提示し、合意した内容を`../../session/query.md`に保存する。`session/`がなければ作成し、更新時はtemporary fileからatomic replaceする。実験計画、Cell構成、Runtime回数、対照の具体案はQueryで固定されていない限りここで決めない。新しいQueryでは前のQueryの条件を無断で引き継がない。
+
+Query確定時には、DirectorがMCP `register_query`でQuery全文を登録する。新しいQueryでは`queryNo`を省略し、改訂時は既存の`queryNo`を指定する。再試行時には同じ`operationKey`を用いる。改訂登録だけならField Controlの再実行は不要。Query未登録ではStart Assignmentを作成しない。

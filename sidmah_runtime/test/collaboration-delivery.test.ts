@@ -22,6 +22,7 @@ function setup() {
   writeFileSync(resolve(root, "worker-model.json"), JSON.stringify({ model: "gpt-5.6-luna", reasoning_effort: "low" }));
   const system = new SidmahSystem(root, configuredProvider(root));
   system.startDirector(system.contextForProviderSession("relay-director", true));
+  system.registerQuery(system.contextForProviderSession("relay-director"), "relay-query", "Relay fixture Query");
   return { root, system, director: () => system.contextForProviderSession("relay-director"), cleanup: () => { system.close(); writable(root); rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } };
 }
 
@@ -119,6 +120,7 @@ test("explicit queue rejection stays pending and is never returned as a successf
   const system = new SidmahSystem(root, provider);
   try {
     system.startDirector(system.contextForProviderSession("queue-director", true));
+    system.registerQuery(system.contextForProviderSession("queue-director"), "queue-query", "Queue fixture Query");
     const director = system.contextForProviderSession("queue-director");
     const cell = await system.createCell(director, { responsibility: "reject queue" });
     await system.acceptCell(system.contextForProviderSession("queue-worker", true), true, cell.assignmentId);

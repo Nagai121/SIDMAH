@@ -78,7 +78,7 @@ export class RuntimeManager {
     ]) if (!runtimeColumns.some(column => column.name === name)) this.db.exec(`ALTER TABLE runtimes ADD COLUMN ${name} ${type}`);
   }
 
-  createStartAssignment(sessionToken: string, cellNo: number, rawMeaning: unknown, timeoutMs?: number): { startId: string; runtimeId: string; runtimeNo: number } {
+  createStartAssignment(sessionToken: string, cellNo: number, rawMeaning: unknown, timeoutMs?: number, bindRuntime?: (runtimeId: string) => void): { startId: string; runtimeId: string; runtimeNo: number } {
     const meaning = startMeaning(rawMeaning);
     const caller = this.cells.caller(sessionToken);
     invariant(caller.kind === "director" && caller.status === "active", "DIRECTOR_NOT_ACTIVE", "Only the active Director may create Start");
@@ -89,6 +89,7 @@ export class RuntimeManager {
       this.db.prepare("UPDATE runtime_counters SET value=value+1 WHERE cell_no=?").run(cellNo);
       const runtimeNo = Number((this.db.prepare("SELECT value FROM runtime_counters WHERE cell_no=?").get(cellNo) as any).value);
       const startId = randomUUID(), runtimeId = randomUUID();
+      bindRuntime?.(runtimeId);
       this.db.prepare("INSERT INTO starts VALUES(?,?,?,?,?,'dispatch_pending',?)").run(startId, runtimeId, cellNo, runtimeNo, json(meaning), Date.now());
       this.db.prepare("INSERT INTO runtimes(runtime_id,cell_no,runtime_no,state,timeout_ms,snapshot_state,archive_state,cleanup_state) VALUES(?,?,?,'created',?,'none','pending','pending')").run(runtimeId, cellNo, runtimeNo, timeoutMs ?? 0);
       this.db.prepare("INSERT INTO worker_dispatch VALUES(?,'start',?,?,30,'pending',?)").run(startId, cellNo, json({ startId, runtimeId, runtimeNo, cellNo, meaning }), Date.now());
