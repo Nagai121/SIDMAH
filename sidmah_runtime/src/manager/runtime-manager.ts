@@ -13,6 +13,7 @@ import type { CellManager } from "./cell-manager.ts";
 import { executePipeline, writeFixedResult } from "../runtime/pipeline.ts";
 
 type FixedResult = { resultRef: string; resultHash: string; manifestRef?: string; executionStatus: string };
+export type QueryContext = { queryNo: number; revisionNo: number };
 
 export class RuntimeManager {
   readonly db: DatabaseSync;
@@ -32,6 +33,8 @@ export class RuntimeManager {
     this.db = openDb(resolve(root, "state", "runtime_management.sqlite"));
     this.log = new MachineLog(resolve(root, "state", "runtime_management-log.txt"));
     this.db.exec(`
+      CREATE TABLE IF NOT EXISTS query_context(singleton INTEGER PRIMARY KEY CHECK(singleton=1),query_no INTEGER NOT NULL,revision_no INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS runtime_queries(runtime_id TEXT PRIMARY KEY,query_no INTEGER NOT NULL,revision_no INTEGER NOT NULL,created_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS runtime_counters(cell_no INTEGER PRIMARY KEY,value INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS sequence_counter(singleton INTEGER PRIMARY KEY CHECK(singleton=1),value INTEGER NOT NULL);
       INSERT OR IGNORE INTO sequence_counter VALUES(1,0);
@@ -78,7 +81,16 @@ export class RuntimeManager {
     ]) if (!runtimeColumns.some(column => column.name === name)) this.db.exec(`ALTER TABLE runtimes ADD COLUMN ${name} ${type}`);
   }
 
-  createStartAssignment(sessionToken: string, cellNo: number, rawMeaning: unknown, timeoutMs?: number, bindRuntime?: (runtimeId: string) => void): { startId: string; runtimeId: string; runtimeNo: number } {
+  rememberQuery(query: QueryContext): void {
+    transaction(this.db, () => this.db.prepare("INSERT INTO query_context VALUES(1,?,?) ON CONFLICT(singleton) DO UPDATE SET query_no=excluded.query_no,revision_no=excluded.revision_no").run(query.queryNo, query.revisionNo));
+  }
+
+  currentQuery(): QueryContext | undefined {
+    const row = this.db.prepare("SELECT query_no,revision_no FROM query_context WHERE singleton=1").get() as any;
+    return row && { queryNo: row.query_no, revisionNo: row.revision_no };
+  }
+
+  createStartAssignment(sessionToken: string, cellNo: number, rawMeaning: unknown, timeoutMs?: number, query?: QueryContext): { startId: string; runtimeId: string; runtimeNo: number } {
     const meaning = startMeaning(rawMeaning);
     const caller = this.cells.caller(sessionToken);
     invariant(caller.kind === "director" && caller.status === "active", "DIRECTOR_NOT_ACTIVE", "Only the active Director may create Start");
@@ -89,10 +101,10 @@ export class RuntimeManager {
       this.db.prepare("UPDATE runtime_counters SET value=value+1 WHERE cell_no=?").run(cellNo);
       const runtimeNo = Number((this.db.prepare("SELECT value FROM runtime_counters WHERE cell_no=?").get(cellNo) as any).value);
       const startId = randomUUID(), runtimeId = randomUUID();
-      bindRuntime?.(runtimeId);
       this.db.prepare("INSERT INTO starts VALUES(?,?,?,?,?,'dispatch_pending',?)").run(startId, runtimeId, cellNo, runtimeNo, json(meaning), Date.now());
       this.db.prepare("INSERT INTO runtimes(runtime_id,cell_no,runtime_no,state,timeout_ms,snapshot_state,archive_state,cleanup_state) VALUES(?,?,?,'created',?,'none','pending','pending')").run(runtimeId, cellNo, runtimeNo, timeoutMs ?? 0);
       this.db.prepare("INSERT INTO worker_dispatch VALUES(?,'start',?,?,30,'pending',?)").run(startId, cellNo, json({ startId, runtimeId, runtimeNo, cellNo, meaning }), Date.now());
+      if (query) this.db.prepare("INSERT INTO runtime_queries VALUES(?,?,?,?)").run(runtimeId, query.queryNo, query.revisionNo, Date.now());
       return { startId, runtimeId, runtimeNo };
     });
     this.log.write("start_committed", output);

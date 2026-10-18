@@ -25,25 +25,38 @@ export class IntegratedStore {
     mkdirSync(resolve(root, "shared_databases"), { recursive: true });
     this.sources = [{ prefix: "cell", db: cells }, { prefix: "runtime", db: runtimes }];
     this.db = openDb(resolve(root, "state", "integrated.sqlite"));
-    this.db.exec([
-      "CREATE TABLE IF NOT EXISTS session_identity(session_id TEXT PRIMARY KEY);",
-      "CREATE TABLE IF NOT EXISTS query_revisions(query_no INTEGER NOT NULL,revision_no INTEGER NOT NULL,operation_key TEXT NOT NULL UNIQUE,content TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(query_no,revision_no));",
-      "CREATE TABLE IF NOT EXISTS active_query(singleton INTEGER PRIMARY KEY CHECK(singleton=1),query_no INTEGER NOT NULL,revision_no INTEGER NOT NULL);",
-      "CREATE TABLE IF NOT EXISTS runtime_queries(runtime_id TEXT PRIMARY KEY,query_no INTEGER NOT NULL,revision_no INTEGER NOT NULL,created_at INTEGER NOT NULL);",
-      "CREATE TABLE IF NOT EXISTS result_json(runtime_id TEXT PRIMARY KEY,result_hash TEXT NOT NULL,body TEXT NOT NULL);",
-      "CREATE TABLE IF NOT EXISTS search_documents(kind TEXT NOT NULL,record_id TEXT NOT NULL,content TEXT NOT NULL,PRIMARY KEY(kind,record_id));",
-      "CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(kind UNINDEXED,record_id UNINDEXED,content,content='search_documents',content_rowid='rowid',tokenize='trigram');",
-      "CREATE TRIGGER IF NOT EXISTS search_documents_ai AFTER INSERT ON search_documents BEGIN INSERT INTO search_fts(rowid,kind,record_id,content) VALUES(new.rowid,new.kind,new.record_id,new.content); END;",
-      "CREATE TRIGGER IF NOT EXISTS search_documents_ad AFTER DELETE ON search_documents BEGIN INSERT INTO search_fts(search_fts,rowid,kind,record_id,content) VALUES('delete',old.rowid,old.kind,old.record_id,old.content); END;",
-      "CREATE TRIGGER IF NOT EXISTS search_documents_au AFTER UPDATE ON search_documents BEGIN INSERT INTO search_fts(search_fts,rowid,kind,record_id,content) VALUES('delete',old.rowid,old.kind,old.record_id,old.content); INSERT INTO search_fts(rowid,kind,record_id,content) VALUES(new.rowid,new.kind,new.record_id,new.content); END;"
-    ].join("\n"));
-    let identity = this.db.prepare("SELECT session_id FROM session_identity LIMIT 1").get() as Row | undefined;
-    if (!identity) {
-      this.db.prepare("INSERT INTO session_identity(session_id) VALUES(?)").run(randomUUID());
-      identity = this.db.prepare("SELECT session_id FROM session_identity LIMIT 1").get() as Row;
-    }
-    invariant(validUUID(String(identity.session_id)), "INVALID_SESSION_UUID", "Integrated DB must have a UUID v4 session identity");
-    this.sessionId = String(identity.session_id);
+    try {
+      this.sessionId = transaction(this.db, () => {
+        this.db.exec([
+          "CREATE TABLE IF NOT EXISTS session_identity(session_id TEXT PRIMARY KEY);",
+          "CREATE TABLE IF NOT EXISTS query_revisions(query_no INTEGER NOT NULL,revision_no INTEGER NOT NULL,operation_key TEXT NOT NULL UNIQUE,content TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(query_no,revision_no));",
+          "CREATE TABLE IF NOT EXISTS active_query(singleton INTEGER PRIMARY KEY CHECK(singleton=1),query_no INTEGER NOT NULL,revision_no INTEGER NOT NULL);",
+          "CREATE TABLE IF NOT EXISTS runtime_queries(runtime_id TEXT PRIMARY KEY,query_no INTEGER NOT NULL,revision_no INTEGER NOT NULL,created_at INTEGER NOT NULL);",
+          "CREATE TABLE IF NOT EXISTS result_json(runtime_id TEXT PRIMARY KEY,result_hash TEXT NOT NULL,body TEXT NOT NULL);",
+          "CREATE TABLE IF NOT EXISTS search_documents(kind TEXT NOT NULL,record_id TEXT NOT NULL,content TEXT NOT NULL,PRIMARY KEY(kind,record_id));",
+          "CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(kind UNINDEXED,record_id UNINDEXED,content,content='search_documents',content_rowid='rowid',tokenize='trigram');",
+          "CREATE TRIGGER IF NOT EXISTS search_documents_ai AFTER INSERT ON search_documents BEGIN INSERT INTO search_fts(rowid,kind,record_id,content) VALUES(new.rowid,new.kind,new.record_id,new.content); END;",
+          "CREATE TRIGGER IF NOT EXISTS search_documents_ad AFTER DELETE ON search_documents BEGIN INSERT INTO search_fts(search_fts,rowid,kind,record_id,content) VALUES('delete',old.rowid,old.kind,old.record_id,old.content); END;",
+          "CREATE TRIGGER IF NOT EXISTS search_documents_au AFTER UPDATE ON search_documents BEGIN INSERT INTO search_fts(search_fts,rowid,kind,record_id,content) VALUES('delete',old.rowid,old.kind,old.record_id,old.content); INSERT INTO search_fts(rowid,kind,record_id,content) VALUES(new.rowid,new.kind,new.record_id,new.content); END;"
+        ].join("\n"));
+        let identity = this.db.prepare("SELECT session_id FROM session_identity LIMIT 1").get() as Row | undefined;
+        if (!identity) {
+          this.db.prepare("INSERT INTO session_identity(session_id) VALUES(?)").run(randomUUID());
+          identity = this.db.prepare("SELECT session_id FROM session_identity LIMIT 1").get() as Row;
+        }
+        invariant(validUUID(String(identity.session_id)), "INVALID_SESSION_UUID", "Integrated DB must have a UUID v4 session identity");
+        return String(identity.session_id);
+      });
+      // Migrate only real v2.0.0 Runtimes; failed Starts may have left orphan links.
+      transaction(runtimes, () => {
+        const insert = runtimes.prepare("INSERT OR IGNORE INTO runtime_queries VALUES(?,?,?,?)");
+        for (const row of this.db.prepare("SELECT * FROM runtime_queries").all() as Row[]) {
+          if (runtimes.prepare("SELECT 1 FROM runtimes WHERE runtime_id=?").get(row.runtime_id)) {
+            insert.run(row.runtime_id, row.query_no, row.revision_no, row.created_at);
+          }
+        }
+      });
+    } catch (error) { this.db.close(); throw error; }
   }
 
   private queryId(queryNo: number, revisionNo: number): string {
@@ -81,18 +94,6 @@ export class IntegratedStore {
     const row = this.db.prepare("SELECT query_no,revision_no FROM active_query WHERE singleton=1").get() as Row | undefined;
     invariant(row, "QUERY_NOT_REGISTERED", "Register the agreed Query before creating Start");
     return { queryNo: row.query_no, revisionNo: row.revision_no };
-  }
-
-  bindRuntime(runtimeId: string): void {
-    const query = this.currentQuery();
-    transaction(this.db, () => {
-      const old = this.db.prepare("SELECT query_no,revision_no FROM runtime_queries WHERE runtime_id=?").get(runtimeId) as Row | undefined;
-      if (old) {
-        invariant(old.query_no === query.queryNo && old.revision_no === query.revisionNo, "RUNTIME_QUERY_CONFLICT", "Runtime Query revision cannot change");
-        return;
-      }
-      this.db.prepare("INSERT INTO runtime_queries(runtime_id,query_no,revision_no,created_at) VALUES(?,?,?,?)").run(runtimeId, query.queryNo, query.revisionNo, Date.now());
-    });
   }
 
   private index(kind: string, id: string, content: string): void {
@@ -146,6 +147,9 @@ export class IntegratedStore {
           for (const table of names) this.mirrorTable(source, table);
         }
         const original = this.sources[1].db;
+        const links = original.prepare("SELECT * FROM runtime_queries").all() as Row[];
+        for (const row of links) this.db.prepare("INSERT INTO runtime_queries VALUES(?,?,?,?) ON CONFLICT(runtime_id) DO UPDATE SET query_no=excluded.query_no,revision_no=excluded.revision_no,created_at=excluded.created_at").run(row.runtime_id, row.query_no, row.revision_no, row.created_at);
+        this.db.exec("DELETE FROM runtime_queries WHERE runtime_id NOT IN (SELECT runtime_id FROM runtime_runtimes)");
         const starts = original.prepare("SELECT start_id,meaning_json FROM starts").all() as Row[];
         const ends = original.prepare("SELECT runtime_id,meaning_json FROM ends WHERE meaning_json IS NOT NULL").all() as Row[];
         for (const x of starts) this.index("start", x.start_id, x.meaning_json);
