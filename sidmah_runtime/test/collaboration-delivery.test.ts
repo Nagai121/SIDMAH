@@ -79,6 +79,9 @@ test("real detached executor delivers Result through relay and End completes Dir
     assert.equal(start.deliveries[0].kind, "start");
     const dispatch = JSON.parse(readFileSync(resolve(x.root, "state", "provider-outbox", "delivery", `${start.deliveries[0].deliveryId}.json`), "utf8"));
     assert.equal(dispatch.payload.runtimeId, start.runtimeId);
+    // The detached executor must sync its own COMMITs, without MCP-side help.
+    const sync = x.system.knowledge!.sync.bind(x.system.knowledge);
+    x.system.knowledge!.sync = () => {};
     await x.system.starter(worker);
     let deliveries = await x.system.getPendingDeliveries(worker);
     for (let n = 0; n < 200 && !deliveries.deliveries.some(d => d.kind === "result"); n++) {
@@ -98,6 +101,10 @@ test("real detached executor delivers Result through relay and End completes Dir
     assert.equal(output.executionStatus, "success");
     assert.equal(output.stages.simulator.exitCode, 0);
     assert.equal(readFileSync(resolve(row.result_ref, "..", "relay.out"), "utf8"), "actual-runtime-output");
+    for (let n = 0; n < 100 && !x.system.knowledge!.db.prepare("SELECT 1 FROM result_json WHERE runtime_id=?").get(start.runtimeId); n++) await delay(50);
+    assert.ok(x.system.knowledge!.db.prepare("SELECT 1 FROM result_json WHERE runtime_id=?").get(start.runtimeId), "executor must integrate Result before exit");
+    assert.equal(x.system.knowledge!.db.prepare("SELECT state FROM runtime_runtimes WHERE runtime_id=?").get(start.runtimeId)!.state, "finished");
+    x.system.knowledge!.sync = sync;
     assert.equal((await x.system.getPendingDeliveries(worker)).deliveries[0].deliveryId, result.deliveryId);
     await x.system.createEnd(worker, end);
     assert.equal((await x.system.getPendingDeliveries(worker)).deliveries.length, 0);

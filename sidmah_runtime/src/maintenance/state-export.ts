@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { invariant } from "../core/errors.ts";
 
-const DATABASES = ["cell_management.sqlite", "runtime_management.sqlite"] as const;
+const DATABASES = ["cell_management.sqlite", "runtime_management.sqlite", "integrated.sqlite"] as const;
 
 function integrity(db: DatabaseSync, label: string): void {
   const row = db.prepare("PRAGMA integrity_check").get() as Record<string, unknown> | undefined;
@@ -22,6 +22,7 @@ export async function exportStateDatabases(root: string, destination: string): P
   const outputs: string[] = [];
   for (const name of DATABASES) {
     const source = resolve(stateRoot, name);
+    if (name === "integrated.sqlite" && !existsSync(source)) continue; // pre-v2 state
     invariant(existsSync(source), "DATABASE_NOT_FOUND", `${name} does not exist`);
     const db = new DatabaseSync(source);
     db.exec("PRAGMA busy_timeout=5000;");

@@ -31,6 +31,9 @@ export class SidmahSystem {
     this.runtimes = new RuntimeManager(root, this.cells, this.sessions);
     try {
       this.knowledge = new IntegratedStore(root, this.cells.db, this.runtimes.db);
+      // Keep the last registered revision available when the derived DB is unavailable.
+      const active = this.knowledge.db.prepare("SELECT query_no,revision_no FROM active_query WHERE singleton=1").get() as any;
+      if (active) this.runtimes.rememberQuery({ queryNo: active.query_no, revisionNo: active.revision_no });
       const sync = () => {
         if (this.pendingIntegrationSync) return;
         // Several successful source COMMITs in one turn need only one derived snapshot.
@@ -65,9 +68,9 @@ export class SidmahSystem {
     await this.pump(); return output;
   }
   async createStart(context: CallerContext, cellNo: number, meaning: unknown, timeoutMs?: number) {
-    invariant(this.knowledge, "INTEGRATED_UNAVAILABLE", "Integrated DB is required for Query-linked Start");
-    this.knowledge.currentQuery();
-    const output = this.runtimes.createStartAssignment(context.sessionToken, cellNo, meaning, timeoutMs, id => this.knowledge!.bindRuntime(id));
+    const query = this.runtimes.currentQuery();
+    invariant(query, "QUERY_NOT_REGISTERED", "Register the agreed Query before creating Start");
+    const output = this.runtimes.createStartAssignment(context.sessionToken, cellNo, meaning, timeoutMs, query);
     await this.pump(); return { ...output, ...this.pendingDeliveries(context) };
   }
 
@@ -125,7 +128,9 @@ export class SidmahSystem {
     const caller = this.cells.caller(context.sessionToken);
     invariant(caller.kind === "director" && caller.status === "active", "DIRECTOR_NOT_ACTIVE", "Only the active Director can register a Query");
     invariant(this.knowledge, "INTEGRATED_UNAVAILABLE", "Integrated DB is unavailable");
-    return this.knowledge.registerQuery(operationKey, content, queryNo);
+    const registered = this.knowledge.registerQuery(operationKey, content, queryNo);
+    this.runtimes.rememberQuery(this.knowledge.currentQuery());
+    return registered;
   }
   listIntegratedSessions(context: CallerContext) {
     invariant(this.cells.caller(context.sessionToken).status === "active", "CALLER_NOT_ACTIVE", "Active session required");
@@ -152,7 +157,16 @@ export class SidmahSystem {
     try { this.knowledge?.sync(); }
     catch (error) { this.logIntegrationFailure("integrated_sync_retry_pending", error); }
   }
-  close(): void { if (this.pendingIntegrationSync) clearImmediate(this.pendingIntegrationSync); for (const unlink of this.unlinkCommitHooks) unlink(); this.knowledge?.close(); this.runtimes.close(); this.cells.close(); }
+  close(): void {
+    if (this.pendingIntegrationSync) {
+      clearImmediate(this.pendingIntegrationSync);
+      this.pendingIntegrationSync = undefined;
+      try { this.knowledge?.sync(); }
+      catch (error) { this.logIntegrationFailure("integrated_sync_retry_pending", error); }
+    }
+    for (const unlink of this.unlinkCommitHooks) unlink();
+    this.knowledge?.close(); this.runtimes.close(); this.cells.close();
+  }
 }
 
 export function environmentProviderSessionId(): string | undefined {

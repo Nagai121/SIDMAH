@@ -24,6 +24,12 @@ SQLiteとmachine logはproject rootの`state/`、Cellの作業物、Snapshot、R
 
 MCP `register_query`でQuery全文を保存します。新規なら`queryNo`を省略し、改訂なら既存の番号を指定します。再試行には同じ`operationKey`を使用し、各RuntimeのQuery RevisionはStart時点で固定されます。
 
+v2.0.1では、登録済みのQuery番号・RevisionをRuntime DBの`query_context`に保持し、StartとそのQueryの対応を同じトランザクションで`runtime_queries`に保存します。既存テーブルの定義は変更しません。統合DBの一時障害でStartを取り消さず、復旧後の同期で対応を反映します。v2.0.0の既存Runtimeの対応付けは起動時に移行します。Queryの新規登録・改訂には統合DBが必要です。
+
 MCP `list_integrated_sessions`で現在のDBと`shared_databases/`にユーザーが配置した外部SQLiteを一覧化できます。DB内のセッションUUIDを指定して`query_integrated_sql`で読み取り専用SQLを実行します。`search_fts`はQuery・Start・End・result.jsonを対象とするFTS5索引です。外部セッションのファイルパスは有効な参照先ではありません。稼働中のDBを共有する場合はSQLiteの整合性のあるバックアップを配置してください。
+
+`search_fts MATCH ?`または`search_fts.content MATCH ?`に単独の1〜2文字の文字・数字を渡した場合は、trigram索引が扱えないためSQL実行時に部分一致へ切り替えます（例: `収束`、`酢酸`）。SQL文字列中の検索語にも対応します。FTSの複合式内に短い語を含める場合や、列の別名・式を使う場合は、`content LIKE ?`へ`%収束%`を渡す形で条件を組み立てます。検索の実行時間・出力量制限は共通です。
+
+分離した実行用プロセスもCOMMIT後に同期し、正常終了時は予約済みの同期を実行してからDBを閉じます。状態exportには`integrated.sqlite`も含みます。
 
 Node.js 24.10以上が必要です。Embeddingモデルとベクトル検索拡張は使用しません。
