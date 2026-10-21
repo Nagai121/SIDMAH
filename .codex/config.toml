@@ -1,0 +1,8 @@
+[mcp_servers.sidmah]
+command = "node"
+args = ["--experimental-strip-types", "sidmah_runtime/src/mcp/server.ts"]
+cwd = "."
+enabled = true
+required = false
+startup_timeout_sec = 30
+tool_timeout_sec = 300
