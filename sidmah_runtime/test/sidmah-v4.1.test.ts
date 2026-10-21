@@ -94,8 +94,8 @@ test("MCP config sync replaces only the SIDMAH entry with relative project-local
     assert.match(text, /name = "keep-me"/);
     assert.match(text, /\[mcp_servers\.other\]/);
     assert.match(text, /required = false/);
-    assert.match(text, /cwd = "\\."/);
-    assert.match(text, /sidmah_runtime\/src\/mcp\/server\\.ts/);
+    assert.ok(text.includes('cwd = "."'));
+    assert.ok(text.includes('"sidmah_runtime/src/mcp/server.ts"'));
     assert.doesNotMatch(text, /config root-/);
     assert.doesNotMatch(text, /C:\/old\/root/);
   } finally { rmSync(root, { recursive: true, force: true }); }
