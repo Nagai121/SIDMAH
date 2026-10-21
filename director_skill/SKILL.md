@@ -2,7 +2,7 @@
 
 ## 起動前確認
 
-Director開始前にproject rootで`sidmah_runtime`の`mcp-config-check`を実行する。不一致なら現在の設定と変更予定をユーザーへ提示し、明示的な同意を得る。同意後に限り`mcp-config-apply`で現在のproject rootを指す`[mcp_servers.sidmah]`とその子sectionを更新する。同意が得られず必要なMCPを利用できない場合は停止する。設定を変更した場合はCodex再起動後に確認し直す。この確認は毎回行う。
+Director開始前にproject rootで`sidmah_runtime`の`mcp-config-check`を実行する。Codex用`.codex/config.toml`とOpenCode用`opencode.json`のSIDMAHエントリーに不一致があれば、現在の設定と変更予定をユーザーへ提示し、明示的な同意を得る。同意後に限り`mcp-config-apply`で両ファイルのSIDMAHエントリーを同期する（他の設定は変更しない）。同意が得られず必要なMCPを利用できない場合は停止する。設定を変更した場合は利用中のMCPクライアントの再起動後に確認し直す。この確認は毎回行う。
 
 <!-- INITIAL-BEGIN -->
 ## Initial Processing
@@ -40,6 +40,6 @@ DirectorはQueryの達成条件を満たすまで、自律的に実験と評価�
 
 WorkerはDirectorが起動する。`create_cell_assignment`が返す`workerModel`と`reasoningEffort`を使用し、ユーザーが明示的に変更した場合だけ別設定を使う。起動したWorkerには最初に`accept_cell_assignment`を呼ばせる。
 
-既定の`collaboration`配送ではWorkerを内部サブエージェントとして起動する。Cellとサブエージェント名の対応を保持する。`create_start_assignment`が返す`deliveries`のWorker通知を、対応するサブエージェントへの`followup_task`で渡す。Runtime引渡し後は`get_pending_deliveries`を確認し、Result通知を同じWorkerへ渡す。待機には短いsleepまたはagent待機を使い、Runtimeに独自の時間制限を加えない。WorkerがEndを提出したらDirector自身宛てのEnd通知を取得してreviewする。通知を読んだだけで処理開始や完了とみなさない。Director終了時は`director_end`に加え、このrunで起動したWorkerを専用連携操作で停止する。詳細は`../sidmah_runtime/docs/provider-contract.md`。
+既定の`collaboration`配送ではWorkerを内部サブエージェントとして起動する。Cellとサブエージェント名の対応を保持する。`create_start_assignment`が返す`deliveries`のWorker通知を、対応するサブエージェントへの専用連携操作（Codexの場合は`followup_task`）で渡す。Runtime引渡し後は`get_pending_deliveries`を確認し、Result通知を同じWorkerへ渡す。待機には短いsleepまたはagent待機を使い、Runtimeに独自の時間制限を加えない。WorkerがEndを提出したらDirector自身宛てのEnd通知を取得してreviewする。通知を読んだだけで処理開始や完了とみなさない。Director終了時は`director_end`に加え、このrunで起動したWorkerを専用連携操作で停止する。詳細は`../sidmah_runtime/docs/provider-contract.md`。
 
 Assignment番号、Worker番号、Runtime番号、timestamp、Binding、fence、sequenceを生成・再出力しない。必要な機械情報はMCP toolが返した値だけを使用する。
