@@ -1,6 +1,6 @@
 # SIDMAH
 
-現在のバージョン: **v2.0.1**
+現在のバージョン: **v2.0.2**
 SIDMAHは、ユーザーから与えられた目的に基づいて計算実験を構築・実行・監査するためのマルチエージェント・ハーネスです。
 
 ## Setup
@@ -10,7 +10,9 @@ git clone https://github.com/Nagai121/SIDMAH.git
 cd SIDMAH
 ```
 
-その後、SIDMAHのproject rootをCodexで開くと完了です。
+Node.js 24.10以降をインストールし、`node`がPATHから呼び出せる状態にします。SIDMAHのproject rootをCodexまたはOpenCodeで開きます。
+
+MCP設定はproject rootの`.codex/config.toml`（Codex）と`opencode.json`（OpenCode）に同梱されています。いずれも絶対パスを含まず、開いているproject rootを作業ディレクトリとして使用します。Codexではprojectを信頼済みにする必要があります。ユーザー共通の旧MCP設定が残る場合は、そちらが古いSIDMAHを指していないか確認してください。
 
 ## Usage
 
@@ -20,7 +22,7 @@ cd SIDMAH
 このSimulatorを使用して、〜について調べてください。
 ```
 
-初回起動時にSIDMAHがMCP設定とWorkerモデルを確認します。MCP設定の変更が必要な場合のみ確認を求め、変更後はCodexを再起動して同じproject rootから再開します。
+初回起動時にSIDMAHがMCP設定とWorkerモデルを確認します。MCP設定の変更が必要な場合のみ確認を求め、変更後は使用中のMCPクライアントを再起動して同じproject rootから再開します。Codex／OpenCode側がMCPプロセスの作業ディレクトリを別の場所に設定していると、相対パスでの起動は失敗します。
 
 このとき、あらかじめ対象となるSimulatorを `simulator/` に配置していても良いし、もしくは存在しなかったらクエリをもとにSIDMAHがsimulator をセットアップします。
 
@@ -58,6 +60,8 @@ SIDMAHでは、1つのWorkerが1つのWork Cellを担当し、各Cellから複�
 ```text
 SIDMAH/
 ├── AGENTS.md
+├── .codex/config.toml
+├── opencode.json
 ├── mcp-config.json
 ├── worker-model.json
 │
