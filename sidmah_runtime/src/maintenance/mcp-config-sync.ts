@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 
 export type HarnessMcpConfig = {
   serverName: string;
@@ -121,7 +122,7 @@ function readOpenCodeConfig(path: string): Record<string, any> {
 export function checkOpenCodeConfig(root: string, path = openCodeConfigPath(root)) {
   const existing = readOpenCodeConfig(path).mcp?.sidmah;
   const expected = expectedOpenCodeEntry(root);
-  const synced = JSON.stringify(existing) === JSON.stringify(expected);
+  const synced = isDeepStrictEqual(existing, expected);
   return { synced, path, root: resolve(root), expected };
 }
 
