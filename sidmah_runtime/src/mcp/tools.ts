@@ -13,7 +13,7 @@ type SystemProvider = () => Promise<SidmahSystem>;
 
 function providerId(meta: unknown): string {
   const id = providerSessionIdFromRequestMeta(meta);
-  invariant(id, "SESSION_CONTEXT_REQUIRED", "This SIDMAH tool requires Codex thread identity in tools/call _meta or an explicit provider session environment fallback");
+  invariant(id, "SESSION_CONTEXT_REQUIRED", "This SIDMAH tool requires caller session identity in tools/call _meta or an explicit provider session environment fallback");
   return id;
 }
 
@@ -23,7 +23,7 @@ async function context(getSystem: SystemProvider, meta: unknown, allowUnregister
 }
 
 export function registerTools(server: StdioMcpServer, getSystem: SystemProvider): void {
-  server.register({ name: "get_pending_deliveries", description: "Poll durable submitted deliveries without claiming them. In collaboration mode the Director relays returned Worker messages using native followup_task, and reviews its own End deliveries. Workers may inspect only their own deliveries. Polling is not processing-started proof.", inputSchema: object({}), call: async (_a, meta) => { const x = await context(getSystem, meta); return x.system.getPendingDeliveries(x.context); } });
+  server.register({ name: "get_pending_deliveries", description: "Poll durable submitted deliveries without claiming them. In collaboration mode the Director relays returned Worker messages using the harness-native continuation operation (followup_task in Codex), and reviews its own End deliveries. Workers may inspect only their own deliveries. Polling is not processing-started proof.", inputSchema: object({}), call: async (_a, meta) => { const x = await context(getSystem, meta); return x.system.getPendingDeliveries(x.context); } });
   server.register({ name: "director_start", description: "Start a new SIDMAH Director run using the caller thread identity supplied by the MCP client.", inputSchema: object({}), call: async (_a, meta) => { const x = await context(getSystem, meta, true); return x.system.startDirector(x.context); } });
   server.register({ name: "create_cell_assignment", description: "Persist Cell and Binding state and return a Worker launch specification to the Director. SIDMAH does not spawn the Worker.", inputSchema: object({ meaning: cell, existingCellNo: integer }, ["meaning"]), call: async (a, meta) => { const x = await context(getSystem, meta); return x.system.createCell(x.context, a.meaning, a.existingCellNo); } });
   server.register({ name: "register_query", description: "Register the full agreed Query or its revision. Supply an operationKey stable across retries. Omit queryNo for a new Query; specify the existing queryNo for a revision. No Field Control rerun required.", inputSchema: object({ operationKey: string, content: string, queryNo: integer }, ["operationKey", "content"]), call: async (a, meta) => { const x = await context(getSystem, meta); return x.system.registerQuery(x.context, a.operationKey, a.content, a.queryNo); } });
