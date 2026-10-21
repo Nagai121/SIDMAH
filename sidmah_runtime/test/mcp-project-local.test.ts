@@ -21,6 +21,11 @@ function fixture() {
   return root;
 }
 
+test("shipped project-local Codex and OpenCode settings match the MCP config generator", () => {
+  const root = resolve(import.meta.dirname, "..", "..");
+  assert.equal(checkAllMcpConfigs(root).synced, true);
+});
+
 test("MCP settings are project-local and require no absolute SIDMAH path", () => {
   const root = fixture();
   try {
