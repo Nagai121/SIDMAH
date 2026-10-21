@@ -82,7 +82,7 @@ test("Codex tools/call _meta.threadId becomes provider identity and resolves int
   } finally { system.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
-test("MCP config sync replaces only sidmah global entry and points it at the current harness root", () => {
+test("MCP config sync replaces only the SIDMAH entry with relative project-local paths", () => {
   const root = mkdtempSync(resolve(tmpdir(), "sidmah-v41-config root-"));
   const configPath = resolve(root, "user-config.toml");
   try {
@@ -94,7 +94,9 @@ test("MCP config sync replaces only sidmah global entry and points it at the cur
     assert.match(text, /name = "keep-me"/);
     assert.match(text, /\[mcp_servers\.other\]/);
     assert.match(text, /required = false/);
-    assert.match(text, new RegExp(resolve(root).replace(/\\/g, "/").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.match(text, /cwd = "\\."/);
+    assert.match(text, /sidmah_runtime\/src\/mcp\/server\\.ts/);
+    assert.doesNotMatch(text, /config root-/);
     assert.doesNotMatch(text, /C:\/old\/root/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
