@@ -5,14 +5,14 @@ SIDMAHのCell、Runtime、Assignment配送と状態を管理する。Node.js 24�
 - MCP起動: `node --experimental-strip-types src/mcp/server.ts ..`
 - provider通知: `node --experimental-strip-types src/provider/events.ts <root> <delivery-started|session-ended> <id> [value]`
 - 状態export: `node --experimental-strip-types src/maintenance/state-export.ts .. <destination>`
-- Codex MCP設定確認: `node --experimental-strip-types src/maintenance/mcp-config-sync.ts .. check`
-- Codex MCP設定同期: `node --experimental-strip-types src/maintenance/mcp-config-sync.ts .. apply`
+- Project MCP設定確認（Codex／OpenCode）: `node --experimental-strip-types src/maintenance/mcp-config-sync.ts .. check`
+- Project MCP設定同期（Codex／OpenCode）: `node --experimental-strip-types src/maintenance/mcp-config-sync.ts .. apply`
 
-各コマンドは`sidmah_runtime/`から実行する。`..`はSIDMAHのproject rootを指す。MCP設定同期では現在のルートを解決し、`~/.codex/config.toml`の`[mcp_servers.sidmah]`とその子sectionだけを更新する。設定を変更する前に`director_skill/SKILL.md`に従い、変更予定を提示してユーザーの同意を得る。設定変更後はCodexを再起動する。
+各コマンドは`sidmah_runtime/`から実行する。`..`はSIDMAHのproject rootを指す。MCP設定同期はproject rootの`.codex/config.toml`内の`[mcp_servers.sidmah]`と`opencode.json`内の`mcp.sidmah`だけを対象とし、その他の設定は保持する。どちらも相対パスと`cwd = "."`でproject rootを基準にMCPサーバーを起動する。プロジェクトを複製・移動しても再同期は不要。クライアントがproject rootを作業ディレクトリとして認識している必要がある。古い`~/.codex/config.toml`の絶対パス指定は自動削除しない。`SIDMAH_CODEX_CONFIG`による別の設定ファイルの明示指定は維持する。OpenCodeの`timeout`はMCPの起動・ツール一覧取得用であり、Codexの`tool_timeout_sec`と同一の設定ではない。設定を変更する前に`director_skill/SKILL.md`に従い、変更予定を提示してユーザーの同意を得る。設定変更後は利用中のMCPクライアントを再起動する。
 
 project rootの`mcp-config.json`がMCP設定の入力である。`worker-model.json`の`model`と`reasoning_effort`をCell Assignment作成時に読み、Directorへ`workerModel`と`reasoningEffort`として返す。WorkerのEnd Assignmentには出力の確認内容と方法を`outputAudit`として含める。
 
-既定providerは`collaboration`方式でStart、Result、Endを`state/provider-outbox/delivery/`へ保存する。Directorは`create_start_assignment`の返す通知と`get_pending_deliveries`を使い、内部サブエージェントのWorkerへ専用の`followup_task`で通知する。保存やpollだけでは処理開始にならず、対応するMCP tool callの受信で確定する。独立した通常チャット向けの旧queue方式はproject rootの`provider-config.json`に`{"mode":"codex-queue"}`を指定した場合だけ使う。内部サブエージェントに旧方式を使わない。設定変更はMCP再起動後に反映する。詳細は`docs/provider-contract.md`を参照する。
+既定providerは`collaboration`方式でStart、Result、Endを`state/provider-outbox/delivery/`へ保存する。Directorは`create_start_assignment`の返す通知と`get_pending_deliveries`を使い、内部サブエージェントのWorkerへ専用の`followup_task`で通知する。保存やpollだけでは処理開始にならず、対応するMCP tool callの受信で確定する。独立したCodex通常チャット向けの旧queue方式はproject rootの`provider-config.json`に`{"mode":"codex-queue"}`を指定した場合だけ使う。内部サブエージェントに旧方式を使わない。設定変更はMCP再起動後に反映する。詳細は`docs/provider-contract.md`を参照する。
 
 MCP tool callの`_meta.threadId`をcaller identityの入口としてManager DBから内部sessionを解決する。MCPのinitialize、ping、tools/listではcaller identityを要求しない。Manager初期化とrecoveryはtool call時まで遅延する。
 
@@ -32,4 +32,4 @@ MCP `list_integrated_sessions`で現在のDBと`shared_databases/`にユーザ�
 
 分離した実行用プロセスもCOMMIT後に同期し、正常終了時は予約済みの同期を実行してからDBを閉じます。状態exportには`integrated.sqlite`も含みます。
 
-Node.js 24.10以上が必要です。Embeddingモデルとベクトル検索拡張は使用しません。
+Node.js 24.10以上が必要です。各MCPクライアントが`node`をPATHから起動できる環境を用意してください。Embeddingモデルとベクトル検索拡張は使用しません。
