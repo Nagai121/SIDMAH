@@ -1,0 +1,16 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "sidmah": {
+      "type": "local",
+      "command": [
+        "node",
+        "--experimental-strip-types",
+        "sidmah_runtime/src/mcp/server.ts"
+      ],
+      "cwd": ".",
+      "enabled": true,
+      "timeout": 30000
+    }
+  }
+}
