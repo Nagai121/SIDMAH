@@ -11,6 +11,7 @@ import type { EndMeaning, ProviderHarness } from "../core/types.ts";
 import { endMeaning, startMeaning } from "../core/validation.ts";
 import type { CellManager } from "./cell-manager.ts";
 import { executePipeline, writeFixedResult } from "../runtime/pipeline.ts";
+import { readVerifiedResult } from "../runtime/result-integrity.ts";
 import { aclSummary, classifySnapshotFailure, freezeSnapshot, removeSnapshot, runStarterPreflight, treeManifest, validateExperiment } from "../runtime/snapshot.ts";
 
 type FixedResult = { resultRef: string; resultHash: string; manifestRef?: string; executionStatus: string };
@@ -250,18 +251,7 @@ export class RuntimeManager {
   }
 
   private readFilesystemResult(runtime: any): FixedResult | undefined {
-    const dir = this.runtimeDirectory(runtime);
-    const resultRef = resolve(dir, "result.json"), manifestRef = resolve(dir, "result.manifest.json");
-    try {
-      const manifest = JSON.parse(readFileSync(manifestRef, "utf8"));
-      const body = readFileSync(resultRef, "utf8");
-      const hash = createHash("sha256").update(body).digest("hex");
-      const result = JSON.parse(body);
-      if (manifest.complete === true && manifest.runtimeId === runtime.runtime_id && manifest.resultHash === hash) {
-        return { resultRef, resultHash: hash, manifestRef, executionStatus: String(result.executionStatus) };
-      }
-    } catch {}
-    return undefined;
+    return readVerifiedResult(this.runtimeDirectory(runtime), runtime.runtime_id);
   }
 
   private recoverOneFilesystemResult(runtime: any): boolean {
