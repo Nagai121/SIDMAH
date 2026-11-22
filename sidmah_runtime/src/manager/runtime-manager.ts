@@ -11,6 +11,7 @@ import type { EndMeaning, ProviderHarness } from "../core/types.ts";
 import { endMeaning, startMeaning } from "../core/validation.ts";
 import type { CellManager } from "./cell-manager.ts";
 import { executePipeline, writeFixedResult } from "../runtime/pipeline.ts";
+import { aclSummary, classifySnapshotFailure, freezeSnapshot, removeSnapshot, runStarterPreflight, treeManifest, validateExperiment } from "../runtime/snapshot.ts";
 
 type FixedResult = { resultRef: string; resultHash: string; manifestRef?: string; executionStatus: string };
 export type QueryContext = { queryNo: number; revisionNo: number };
@@ -130,103 +131,16 @@ export class RuntimeManager {
     return count;
   }
 
-  private validateExperiment(snapshot: string): void {
-    const path = resolve(snapshot, "experiment.json");
-    invariant(existsSync(path), "EXPERIMENT_MISSING", "Work Place must contain experiment.json");
-    const value = JSON.parse(readFileSync(path, "utf8"));
-    invariant(value && typeof value === "object" && Object.keys(value).sort().join("|") === "finisher|simulator|starter", "EXPERIMENT_INVALID", "experiment.json must contain exactly starter, simulator, finisher");
-    for (const name of ["starter", "simulator", "finisher"]) {
-      const command = value[name];
-      invariant(Array.isArray(command) && command.length > 0 && command.every((x: unknown) => typeof x === "string" && x.length > 0), "EXPERIMENT_INVALID", `${name} must be a non-empty command array`);
-      invariant(command.slice(1).every((x: string) => !isAbsolute(x) && !x.split(/[\\/]/).includes("..")), "SNAPSHOT_ESCAPE", `${name} arguments may not escape Snapshot`);
-    }
-  }
-
-  private freezeSnapshot(path: string): void {
-    const stat = lstatSync(path);
-    if (stat.isDirectory()) {
-      for (const name of readdirSync(path)) this.freezeSnapshot(resolve(path, name));
-    }
-    try { chmodSync(path, stat.mode & ~0o222); } catch {}
-  }
-
-  private makeWritable(path: string): void {
-    if (!existsSync(path)) return;
-    const stat = lstatSync(path);
-    if (stat.isDirectory()) for (const name of readdirSync(path)) this.makeWritable(resolve(path, name));
-    try { chmodSync(path, stat.mode | 0o200); } catch {}
-  }
-
-  private removeSnapshot(path: string): void {
-    this.makeWritable(path);
-    rmSync(path, { recursive: true, force: true });
-  }
 
   private runtimeDirectory(runtime: { cell_no: number; runtime_no: number }): string {
     return resolve(this.root, "works", `cell_${runtime.cell_no}`, `runtime_${runtime.runtime_no}`);
   }
 
-  private treeManifest(root: string): { hash: string; entries: Array<Record<string, unknown>> } {
-    const entries: Array<Record<string, unknown>> = [];
-    const visit = (path: string, relative: string): void => {
-      const stat = lstatSync(path);
-      if (stat.isDirectory()) {
-        entries.push({ path: relative || ".", type: "directory", mode: stat.mode, size: stat.size });
-        for (const name of readdirSync(path).sort()) visit(resolve(path, name), relative ? `${relative}/${name}` : name);
-      } else {
-        const body = readFileSync(path);
-        entries.push({ path: relative, type: "file", mode: stat.mode, size: stat.size, sha256: createHash("sha256").update(body).digest("hex") });
-      }
-    };
-    visit(root, "");
-    return { hash: createHash("sha256").update(json(entries)).digest("hex"), entries };
-  }
-
-  private aclSummary(path: string): Record<string, unknown> {
-    if (process.platform !== "win32") return { platform: process.platform, available: false };
-    try {
-      const result = spawnSync("icacls", [path], { encoding: "utf8", windowsHide: true, timeout: 5_000 });
-      return { platform: "win32", available: result.status === 0, status: result.status, stdout: result.stdout?.slice(0, 16_384), stderr: result.stderr?.slice(0, 4_096) };
-    } catch (error) { return { platform: "win32", available: false, error: String(error) }; }
-  }
-
-  private classifySnapshotFailure(error: any, source: string, destination: string): string {
-    if (existsSync(destination)) return "destination_exists";
-    if (!existsSync(source)) return "invalid_source_tree";
-    if (["EACCES", "EROFS"].includes(error?.code)) return "access_or_acl";
-    if (["EBUSY", "ENOTEMPTY"].includes(error?.code)) return "transient_lock";
-    if (error?.code === "EPERM") return process.platform === "win32" ? "unknown_windows_lock" : "access_or_acl";
-    return "unknown";
-  }
-
-  private async runStarterPreflight(workPlace: string, runtimeDir: string, timeoutMs: number): Promise<void> {
-    const preflight = resolve(runtimeDir, `.preflight-${randomUUID()}`);
-    const preflightOutput = resolve(runtimeDir, `.preflight-output-${randomUUID()}`);
-    try {
-      cpSync(workPlace, preflight, { recursive: true, errorOnExist: true });
-      mkdirSync(preflightOutput, { recursive: true });
-      this.validateExperiment(preflight);
-      this.freezeSnapshot(preflight);
-      const before = this.treeManifest(preflight).hash;
-      const contract = JSON.parse(readFileSync(resolve(preflight, "experiment.json"), "utf8"));
-      const [command, ...args] = contract.starter as string[];
-      const result = spawnSync(command, args, {
-        cwd: preflight, encoding: "utf8", windowsHide: true, timeout: timeoutMs,
-        env: { ...process.env, SIDMAH_PREFLIGHT: "1", SIDMAH_SNAPSHOT: preflight, SIDMAH_RUNTIME_OUTPUT: preflightOutput },
-      });
-      const after = this.treeManifest(preflight).hash;
-      invariant(result.status === 0 && !result.error, "STARTER_PREFLIGHT_FAILED", `Starter preflight failed: ${result.error ?? result.stderr ?? `exit ${result.status}`}`);
-      invariant(before === after, "STARTER_PREFLIGHT_MUTATED", "Starter modified the read-only preflight Snapshot");
-    } finally {
-      this.removeSnapshot(preflight);
-      rmSync(preflightOutput, { recursive: true, force: true });
-    }
-  }
 
   private async commitSnapshot(runtimeId: string, temporary: string, snapshot: string, workPlace: string, sourceHash: string): Promise<void> {
     const attempts: Array<Record<string, unknown>> = [];
     const waits = [0, 50, 100, 250, 500];
-    transaction(this.db, () => this.db.prepare(`UPDATE runtimes SET snapshot_state='commit_pending',snapshot_temporary_path=?,snapshot_source_path=?,snapshot_destination_path=?,snapshot_source_hash=?,snapshot_failure_class=NULL,snapshot_diagnostics_json=? WHERE runtime_id=?`).run(temporary, workPlace, snapshot, sourceHash, json({ manifest: this.treeManifest(temporary) }), runtimeId));
+    transaction(this.db, () => this.db.prepare(`UPDATE runtimes SET snapshot_state='commit_pending',snapshot_temporary_path=?,snapshot_source_path=?,snapshot_destination_path=?,snapshot_source_hash=?,snapshot_failure_class=NULL,snapshot_diagnostics_json=? WHERE runtime_id=?`).run(temporary, workPlace, snapshot, sourceHash, json({ manifest: treeManifest(temporary) }), runtimeId));
     for (let index = 0; index < waits.length; index++) {
       if (waits[index]) await delay(waits[index]);
       const attemptedAt = Date.now();
@@ -237,8 +151,8 @@ export class RuntimeManager {
       } catch (error: any) {
         attempts.push({ attempt: index + 1, attemptedAt, ok: false, code: error?.code, errno: error?.errno, message: String(error) });
         if (!["EPERM", "EBUSY", "ENOTEMPTY"].includes(error?.code) || index === waits.length - 1) {
-          const failureClass = this.classifySnapshotFailure(error, temporary, snapshot);
-          const diagnostics = { failureClass, code: error?.code, errno: error?.errno, message: String(error), attempts, temporaryPath: temporary, sourcePath: workPlace, destinationPath: snapshot, sourceHash, manifest: this.treeManifest(temporary), attributes: lstatSync(temporary), acl: this.aclSummary(temporary), recordedAt: Date.now() };
+          const failureClass = classifySnapshotFailure(error, temporary, snapshot);
+          const diagnostics = { failureClass, code: error?.code, errno: error?.errno, message: String(error), attempts, temporaryPath: temporary, sourcePath: workPlace, destinationPath: snapshot, sourceHash, manifest: treeManifest(temporary), attributes: lstatSync(temporary), acl: aclSummary(temporary), recordedAt: Date.now() };
           transaction(this.db, () => this.db.prepare("UPDATE runtimes SET snapshot_state='commit_failed',snapshot_failure_class=?,snapshot_diagnostics_json=? WHERE runtime_id=?").run(failureClass, json(diagnostics), runtimeId));
           this.log.write("snapshot_commit_failed", { runtimeId, ...diagnostics });
           throw error;
@@ -260,24 +174,24 @@ export class RuntimeManager {
     const runtimeDir = this.runtimeDirectory(start);
     const snapshot = resolve(runtimeDir, `snapshot-${start.runtime_no}`);
     mkdirSync(runtimeDir, { recursive: true });
-    await this.runStarterPreflight(workPlace, runtimeDir, runtime.timeout_ms);
+    await runStarterPreflight(workPlace, runtimeDir, runtime.timeout_ms);
     let current = this.db.prepare("SELECT * FROM runtimes WHERE runtime_id=?").get(runtime.runtime_id) as any;
     let temporary = ["commit_failed", "commit_pending"].includes(current.snapshot_state) ? current.snapshot_temporary_path : undefined;
-    const sourceHash = this.treeManifest(workPlace).hash;
+    const sourceHash = treeManifest(workPlace).hash;
     if (!temporary || !existsSync(temporary) || current.snapshot_source_hash !== sourceHash) {
       temporary = `${snapshot}.${randomUUID()}.tmp`;
       transaction(this.db, () => this.db.prepare("UPDATE runtimes SET snapshot_state='copying',snapshot_temporary_path=?,snapshot_source_path=?,snapshot_destination_path=?,snapshot_source_hash=? WHERE runtime_id=?").run(temporary, workPlace, snapshot, sourceHash, runtime.runtime_id));
       try {
         cpSync(workPlace, temporary, { recursive: true, errorOnExist: true });
       } catch (error) {
-        this.removeSnapshot(temporary);
+        removeSnapshot(temporary);
         transaction(this.db, () => this.db.prepare("UPDATE runtimes SET snapshot_state='none',snapshot_temporary_path=NULL WHERE runtime_id=? AND state='created' AND snapshot_state='copying' AND snapshot_temporary_path=?").run(runtime.runtime_id, temporary));
         throw error;
       }
     }
-    this.validateExperiment(temporary);
+    validateExperiment(temporary);
     await this.commitSnapshot(runtime.runtime_id, temporary, snapshot, workPlace, sourceHash);
-    this.freezeSnapshot(snapshot);
+    freezeSnapshot(snapshot);
     const executorToken = randomUUID();
     try {
       this.cells.withWorkerCommitFence(start.cell_no, sessionToken, "start", startId, binding.fence, () => {
@@ -290,7 +204,7 @@ export class RuntimeManager {
     } catch (error) {
       const current = this.db.prepare("SELECT state FROM runtimes WHERE runtime_id=?").get(runtime.runtime_id) as any;
       if (current?.state === "created" && existsSync(snapshot)) {
-        this.removeSnapshot(snapshot);
+        removeSnapshot(snapshot);
         transaction(this.db, () => this.db.prepare("UPDATE runtimes SET snapshot_state='none',snapshot_temporary_path=NULL,snapshot_failure_class=NULL,snapshot_diagnostics_json=NULL WHERE runtime_id=? AND state='created'").run(runtime.runtime_id));
       }
       throw error;
@@ -580,7 +494,7 @@ export class RuntimeManager {
         invariant(existsSync(final), "ARCHIVE_MISSING", "Fixed archive is missing; preserve Snapshot");
         const check = spawnSync("tar", ["-tf", final], { encoding: "utf8", windowsHide: true });
         invariant(check.status === 0 && check.stdout.split(/\r?\n/).some(name => name === `${snapshotName}/` || name === snapshotName), "ARCHIVE_INVALID", "Fixed archive is unreadable or has the wrong Snapshot root; preserve Snapshot");
-        this.removeSnapshot(snapshot);
+        removeSnapshot(snapshot);
         transaction(this.db, () => this.db.prepare("UPDATE runtimes SET cleanup_state='complete',archive_diagnostics_json=NULL WHERE runtime_id=?").run(runtimeId));
       } catch (cleanupError) {
         transaction(this.db, () => this.db.prepare("UPDATE runtimes SET cleanup_state='failed',archive_diagnostics_json=? WHERE runtime_id=?").run(json({ stage: "cleanup", error: String(cleanupError), recordedAt: Date.now() }), runtimeId));
@@ -636,28 +550,28 @@ export class RuntimeManager {
       if (!existsSync(snapshot)) continue;
       try {
         if (runtime.snapshot_state === "commit_pending") {
-          const actual = this.treeManifest(snapshot);
+          const actual = treeManifest(snapshot);
           const saved = runtime.snapshot_diagnostics_json ? parseJson<any>(runtime.snapshot_diagnostics_json).manifest : undefined;
           // Freezing removes write permissions; directory sizes can change during a copy.
           const contents = (entries: Array<Record<string, unknown>>) => json(entries.map(entry => ({ path: entry.path, type: entry.type, sha256: entry.sha256, mode: Number(entry.mode) & ~0o222 })));
           let matches = actual.hash === runtime.snapshot_source_hash;
           if (saved) matches = contents(actual.entries) === contents(saved.entries);
           else if (!matches && runtime.snapshot_source_path && existsSync(runtime.snapshot_source_path)) {
-            const source = this.treeManifest(runtime.snapshot_source_path);
+            const source = treeManifest(runtime.snapshot_source_path);
             matches = source.hash === runtime.snapshot_source_hash && contents(actual.entries) === contents(source.entries);
           }
           invariant(matches, "SNAPSHOT_RECOVERY_MISMATCH", "Committed Snapshot does not match its recorded source");
         }
-        this.validateExperiment(snapshot);
-        this.freezeSnapshot(snapshot);
+        validateExperiment(snapshot);
+        freezeSnapshot(snapshot);
       } catch (error) {
-        this.removeSnapshot(snapshot);
+        removeSnapshot(snapshot);
         this.db.prepare("UPDATE runtimes SET snapshot_state='none' WHERE runtime_id=? AND state='created'").run(runtime.runtime_id);
         this.log.write("orphan_snapshot_rejected", { runtimeId: runtime.runtime_id, error: String(error) });
         continue;
       }
       if (this.cells.workerItemState("start", runtime.start_id) !== "active") {
-        this.removeSnapshot(snapshot);
+        removeSnapshot(snapshot);
         this.log.write("stale_snapshot_discarded", { runtimeId: runtime.runtime_id });
         continue;
       }
@@ -670,14 +584,14 @@ export class RuntimeManager {
       }));
       if (adopted === true) {
         if (runtime.snapshot_temporary_path && existsSync(runtime.snapshot_temporary_path)) {
-          this.removeSnapshot(runtime.snapshot_temporary_path);
+          removeSnapshot(runtime.snapshot_temporary_path);
         }
         this.cells.completeItemBySource("start", runtime.start_id);
         this.log.write("snapshot_recovered", { runtimeId: runtime.runtime_id });
         recovered++;
       } else {
         const current = this.db.prepare("SELECT state FROM runtimes WHERE runtime_id=?").get(runtime.runtime_id) as any;
-        if (current?.state === "created" && existsSync(snapshot)) { this.removeSnapshot(snapshot); }
+        if (current?.state === "created" && existsSync(snapshot)) { removeSnapshot(snapshot); }
       }
     }
     return recovered;
